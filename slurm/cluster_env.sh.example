@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Cluster-specific environment. Copy to slurm/cluster_env.sh and edit; every
+# slurm/ template sources slurm/cluster_env.sh if it exists. The values below
+# are the ones used for the paper runs on Princeton's Della cluster.
+
+# Job routing: sbatch reads SBATCH_* environment variables natively.
+export SBATCH_PARTITION=${SBATCH_PARTITION:-pli-c}
+# export SBATCH_QOS=pli-cp                  # some accounts needed this for OLMo runs
+# export SBATCH_MAIL_USER=you@example.com
+# export SBATCH_MAIL_TYPE=END,FAIL
+
+# Compute-node internet access (HF downloads, wandb) goes through a proxy.
+module purge
+module load proxy/default
+
+# NCCL workarounds for the CUDA driver / NCCL version mismatch on Della H100s.
+export NCCL_P2P_DISABLE=1
+export NCCL_SHM_DISABLE=1
+
+# Keep Python user-site and caches off the small home quota.
+export PYTHONUSERBASE=/dev/null
+export PYTHONUNBUFFERED=1
+# export UV_CACHE_DIR=/scratch/gpfs/<group>/$USER/.cache/uv
+# export HF_HOME=/scratch/gpfs/<group>/$USER/.cache/huggingface

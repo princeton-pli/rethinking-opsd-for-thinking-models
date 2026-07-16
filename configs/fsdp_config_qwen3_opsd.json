@@ -1,0 +1,5 @@
+{
+    "transformer_layer_cls_to_wrap": "Qwen3DecoderLayer",
+    "use_orig_params": true,
+    "sync_module_states": true
+}

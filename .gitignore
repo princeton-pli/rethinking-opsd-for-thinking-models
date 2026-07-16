@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+envs/**/.venv/
+.ipynb_checkpoints/
+
+# Experiment outputs (regenerated, never committed)
+checkpoints/
+logs/
+outputs/
+wandb/
+slurm-*.out
+*.out
+
+# Data artifacts (rebuilt from Hugging Face via data/ scripts)
+data/raw/
+data/processed/
+*.parquet
+*.jsonl
+
+# Misc
+.DS_Store
+
+# Internal validation (not part of the release)
+tests/
+
+# Local-only (cluster config, model symlinks)
+slurm/cluster_env.sh
+models

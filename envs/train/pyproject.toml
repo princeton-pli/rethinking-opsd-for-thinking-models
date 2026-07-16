@@ -1,0 +1,32 @@
+[project]
+name = "rethinking-opsd-train"
+version = "0.1.0"
+description = "OPSD training + sharded vLLM generation + eval env, pinned to the versions recorded in the paper runs"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    # Core stack — pinned to the versions validated on Della H100s
+    "torch==2.9.0",
+    "transformers==4.57.1",
+    "trl==0.24.0",
+    "datasets==4.3.0",
+    "accelerate==1.11.0",
+    "peft==0.17.1",
+    "vllm==0.12.0",
+    # Grading (evals/grader.py: SymPy + LaTeX parsing)
+    "sympy==1.14.0",
+    "latex2sympy2==1.9.1",
+    "antlr4-python3-runtime==4.7.2",
+    # Logging / data
+    "wandb==0.22.2",
+    "numpy==2.2.6",
+    "pandas",
+    "pyarrow",
+    "tqdm",
+    # Optional fused kernels (USE_LIGER_KERNEL=true in slurm/config.sh)
+    "liger-kernel>=0.4.2",
+    # LLM-as-judge experiments / data generation
+    "anthropic==0.71.0",
+]
+
+[tool.uv]
+# Reproducibility: `uv sync --frozen` installs exactly what uv.lock records.
