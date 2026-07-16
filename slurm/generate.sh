@@ -73,7 +73,8 @@ python run_generate.py \
 if [ "$SLURM_ARRAY_TASK_ID" -eq 0 ] && [ "${SKIP_EVAL_CHAIN:-false}" != "true" ]; then
   GENERATE_JOB_ID="${SLURM_ARRAY_JOB_ID}"
   echo "[EVAL] Submitting metrics job (dependent on all array tasks in $GENERATE_JOB_ID)."
-  sbatch \
+  # CPU-only job: scrub GPU-partition routing exported by cluster_env.sh.
+  env -u SBATCH_PARTITION -u SBATCH_QOS sbatch \
       --dependency=afterok:"$GENERATE_JOB_ID" \
       --export=ALL \
       slurm/eval.sh

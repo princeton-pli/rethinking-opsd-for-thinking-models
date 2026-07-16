@@ -76,5 +76,10 @@ if [ "${JSONL_COMPLETED}" != "true" ]; then
 fi
 
 echo "[RETRY WRAPPER] Submitting eval metrics job..."
-sbatch --export=ALL slurm/eval.sh
+# The metrics job is CPU-only: scrub GPU-partition routing that cluster_env.sh
+# may have exported, so it lands on the cluster's default partition.
+env -u SBATCH_PARTITION -u SBATCH_QOS sbatch --export=ALL slurm/eval.sh || {
+    echo "[RETRY WRAPPER] FATAL: metrics job submission failed."
+    exit 1
+}
 echo "[RETRY WRAPPER] Done."
