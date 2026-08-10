@@ -65,6 +65,13 @@ GOLD_ANSWER_KEY=${GOLD_ANSWER_KEY:-"answer"}
 # Teacher prompt template override (used by the conciseness-control run)
 TEACHER_PROMPT_TEMPLATE="${TEACHER_PROMPT_TEMPLATE:-}"
 
+# Wrong-rollout gate (contrastive OPSD)
+GATE_MODE=${GATE_MODE:-none}
+GATE_MAX_REGEN_ROUNDS=${GATE_MAX_REGEN_ROUNDS:-3}
+GATE_REQUIRE_DIFF_ANSWER=${GATE_REQUIRE_DIFF_ANSWER:-True}
+GATE_GOLD_ANSWER_KEY=${GATE_GOLD_ANSWER_KEY:-""}
+GATE_WRONG_ANSWER_KEY=${GATE_WRONG_ANSWER_KEY:-""}
+
 # Training hyperparameters
 OPSD_LR=${OPSD_LR:-5e-6}
 OPSD_EPOCHS=${OPSD_EPOCHS:-1}
@@ -87,7 +94,11 @@ NOTHINK_SUFFIX=""
 if [ "${ENABLE_THINKING}" = "false" ]; then
     NOTHINK_SUFFIX="__nothink"
 fi
-export OPSD_CHECKPOINT_PATH="checkpoints/opsd__m_${model_basename}__d_${data_basename}__alpha${OPSD_ALPHA}__bs${OPSD_TRUE_BATCH_SIZE}__lr${OPSD_LR}__ep${OPSD_EPOCHS}${MPL_SUFFIX}${FT_SUFFIX}${NOTHINK_SUFFIX}"
+GATE_SUFFIX=""
+if [ "${GATE_MODE}" != "none" ]; then
+    GATE_SUFFIX="__gate_${GATE_MODE}"
+fi
+export OPSD_CHECKPOINT_PATH="checkpoints/opsd__m_${model_basename}__d_${data_basename}__alpha${OPSD_ALPHA}__bs${OPSD_TRUE_BATCH_SIZE}__lr${OPSD_LR}__ep${OPSD_EPOCHS}${MPL_SUFFIX}${FT_SUFFIX}${NOTHINK_SUFFIX}${GATE_SUFFIX}"
 mkdir -p "$OPSD_CHECKPOINT_PATH"
 
 echo "=============================================="
@@ -159,6 +170,11 @@ train() {
         --use_vllm="${USE_VLLM}" \
         ${TEACHER_PROMPT_TEMPLATE:+--teacher_prompt_template="${TEACHER_PROMPT_TEMPLATE}"} \
         ${FORCE_THINKING_PREFIX:+--force_thinking_prefix="${FORCE_THINKING_PREFIX}"} \
+        --gate_mode="${GATE_MODE}" \
+        --gate_max_regen_rounds="${GATE_MAX_REGEN_ROUNDS}" \
+        --gate_require_diff_answer="${GATE_REQUIRE_DIFF_ANSWER}" \
+        ${GATE_GOLD_ANSWER_KEY:+--gate_gold_answer_key="${GATE_GOLD_ANSWER_KEY}"} \
+        ${GATE_WRONG_ANSWER_KEY:+--gate_wrong_answer_key="${GATE_WRONG_ANSWER_KEY}"} \
         --enable_thinking="${ENABLE_THINKING}"
 }
 

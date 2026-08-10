@@ -717,6 +717,37 @@ class DistilConfig(TrainingArguments):
         },
     )
 
+    # Parameters that control wrong-rollout gating (contrastive OPSD)
+    gate_mode: str = field(
+        default="none",
+        metadata={
+            "help": "'none' (default) or 'wrong_only'. When 'wrong_only', the JSD loss is applied only to "
+            "rollouts whose final answer is incorrect (and, when gate_require_diff_answer=True, also differs "
+            "from the known wrong answer in the 'wrong_answer' dataset column). Rollouts failing the gate are "
+            "regenerated up to gate_max_regen_rounds times; rows still failing are zero-masked and excluded "
+            "from the loss normalization, so each step averages over live (gated) rollouts only. Requires "
+            "'gold_answer' (and optionally 'wrong_answer') dataset columns. Only supported with colocated vLLM "
+            "at tensor_parallel_size 1 or non-vLLM generation; incompatible with speculative_generation, "
+            "splice_generation, generate_from_teacher, and use_critique."
+        },
+    )
+    gate_max_regen_rounds: int = field(
+        default=3,
+        metadata={
+            "help": "Maximum full-batch regeneration rounds used to replace rollouts that fail the gate. Every "
+            "rank always runs the same number of rounds (uniform collectives); regenerated candidates replace "
+            "failed rows only. Only active when gate_mode='wrong_only'."
+        },
+    )
+    gate_require_diff_answer: bool = field(
+        default=True,
+        metadata={
+            "help": "When True, gated rollouts must produce a wrong answer that also differs (math-equivalence) "
+            "from the teacher-context wrong answer in the 'wrong_answer' column. Only active when "
+            "gate_mode='wrong_only'."
+        },
+    )
+
     # Parameters that control critique-conditioned self-teaching
     use_critique: bool = field(
         default=False,

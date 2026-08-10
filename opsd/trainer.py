@@ -572,7 +572,7 @@ class DistilTrainer(BaseTrainer):
         # In DistilTrainer, we preprocess data, so using the model's signature columns doesn't work.
         # Instead, we set them to the columns expected by the `training_step` method, hence the override.
         if self._signature_columns is None:
-            self._signature_columns = ["prompt", "teacher_prompt", "image", "images"]
+            self._signature_columns = ["prompt", "teacher_prompt", "image", "images", "gold_answer", "gate_gold_answer", "wrong_answer"]
 
     # This method overrides `Trainer.get_train_dataloader` to support our custom batching strategy.
     # Instead of returning a standard per-step batch (i.e., `per_device_batch_size), our dataloader loads an
@@ -1887,6 +1887,43 @@ class DistilTrainer(BaseTrainer):
 
         return critiques
 
+    def _gate_status(self, completion_ids_list, gold_answers, wrong_answers):
+        """Wrong-only gate: True where a completion is (a) terminated (not truncated),
+        (b) gradeable, (c) incorrect vs the gold answer, and (d) when
+        gate_require_diff_answer, math-inequivalent to the in-context wrong answer."""
+        from evaluation.utils import extract_answer_math
+        from evaluation.grader import math_equal
+
+        eos_and_pad = [self.eos_token_id, self.pad_token_id]
+        live = []
+        for ids, gold, wrong in zip(completion_ids_list, gold_answers, wrong_answers):
+            ids = list(ids)
+            if len(ids) == 0 or ids[-1] not in eos_and_pad:
+                live.append(False)  # truncated -> no final answer -> ungradeable
+                continue
+            text = self.processing_class.decode(ids, skip_special_tokens=True)
+            pred = extract_answer_math(text)
+            if not pred:
+                live.append(False)
+                continue
+            try:
+                is_correct = math_equal(pred, str(gold), timeout=True)
+            except Exception:
+                is_correct = False
+            if is_correct:
+                live.append(False)
+                continue
+            if self.args.gate_require_diff_answer and wrong:
+                try:
+                    same_as_ctx = math_equal(pred, str(wrong), timeout=True)
+                except Exception:
+                    same_as_ctx = False
+                if same_as_ctx:
+                    live.append(False)
+                    continue
+            live.append(True)
+        return live
+
     def _generate_and_score_completions(
         self, inputs: list[dict[str, Union[torch.Tensor, Any]]]
     ) -> dict[str, Union[torch.Tensor, Any]]:
@@ -2030,6 +2067,49 @@ class DistilTrainer(BaseTrainer):
                 sampling_per_token_logps_list,
                 forward_kwargs,
             ) = self._generate(generation_prompts, images)
+
+        # Wrong-rollout gate (contrastive OPSD): the loss is applied only to rollouts
+        # whose final answer is wrong and, optionally, different (math-equivalence)
+        # from the known wrong answer already in the teacher context. Rows failing
+        # the gate are regenerated for a bounded number of full-batch rounds; every
+        # rank runs the same rounds so collective calls stay uniform (early exit is
+        # itself a gathered, rank-uniform decision). Rows still failing after all
+        # rounds are zero-masked below and excluded from the loss normalization.
+        gate_live_mask = None
+        if self.args.gate_mode == "wrong_only" and mode == "train" and not self.args.splice_generation:
+            gate_golds = [x.get("gate_gold_answer", "") for x in inputs]
+            gate_wrongs = [x.get("wrong_answer", "") for x in inputs]
+            gate_live = self._gate_status(completion_ids_list, gate_golds, gate_wrongs)
+            initial_live = sum(gate_live)
+            rounds_used = 0
+            for _round in range(self.args.gate_max_regen_rounds):
+                all_live_local = torch.tensor(all(gate_live), device=device, dtype=torch.bool)
+                if self.accelerator.gather(all_live_local).all().item():
+                    break
+                rounds_used += 1
+                (
+                    _regen_prompt_ids_list,
+                    regen_completion_ids_list,
+                    _regen_num_items,
+                    regen_logps_list,
+                    _regen_forward_kwargs,
+                ) = self._generate(prompts, images)
+                regen_live = self._gate_status(regen_completion_ids_list, gate_golds, gate_wrongs)
+                for i in range(len(completion_ids_list)):
+                    if not gate_live[i] and regen_live[i]:
+                        completion_ids_list[i] = regen_completion_ids_list[i]
+                        if sampling_per_token_logps_list is not None and regen_logps_list is not None:
+                            sampling_per_token_logps_list[i] = regen_logps_list[i]
+                        gate_live[i] = True
+            gate_live_mask = torch.tensor(gate_live, dtype=torch.bool, device=device)
+            agg_live = self.accelerator.gather(gate_live_mask.float().mean())
+            self._metrics[mode]["gate/live_fraction"].append(agg_live.mean().item())
+            self._metrics[mode]["gate/initial_live_fraction"].append(
+                self.accelerator.gather(
+                    torch.tensor(initial_live / max(len(gate_live), 1), device=device)
+                ).mean().item()
+            )
+            self._metrics[mode]["gate/regen_rounds"].append(float(rounds_used))
 
         # On-policy demo: score completions and conditionally swap teacher prompts
         if use_onpolicy_path:
@@ -2224,6 +2304,10 @@ class DistilTrainer(BaseTrainer):
             eos_and_pad = [self.eos_token_id, self.pad_token_id]
             is_truncated = torch.tensor([ids[-1] not in eos_and_pad for ids in completion_ids_list], device=device)
             completion_mask = completion_mask * (~is_truncated).unsqueeze(1).int()
+
+        # Zero out rollouts that failed the wrong-only gate after all regen rounds.
+        if gate_live_mask is not None:
+            completion_mask = completion_mask * gate_live_mask.unsqueeze(1).int()
 
         # Concatenate prompt_mask with completion_mask for logit computation
         prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)  # (B, P+C)
@@ -2504,7 +2588,15 @@ class DistilTrainer(BaseTrainer):
         if entropy_mask is not None:
             per_token_loss = per_token_loss * entropy_mask
 
-        loss = ((per_token_loss * loss_completion_mask).sum(-1) / loss_completion_mask.sum(-1).clamp(min=1.0)).mean()
+        per_seq_loss = (per_token_loss * loss_completion_mask).sum(-1) / loss_completion_mask.sum(-1).clamp(min=1.0)
+        if self.args.gate_mode == "wrong_only":
+            # Average over live (non-zero-mask) rows only, so gated-out rows do not
+            # dilute the step: each step is a mean over the same effective batch of
+            # gated rollouts regardless of how many rows the gate killed.
+            live_rows = (loss_completion_mask.sum(-1) > 0).float()
+            loss = (per_seq_loss * live_rows).sum() / live_rows.sum().clamp(min=1.0)
+        else:
+            loss = per_seq_loss.mean()
         loss = loss / self.current_gradient_accumulation_steps
 
         # Log the metrics

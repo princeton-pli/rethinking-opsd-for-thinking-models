@@ -124,6 +124,17 @@ def parse_args():
     parser.add_argument("--splice_k", type=float, default=0.5,
                         help="Fraction of Pass 1 tokens used as prefix for Pass 2 (in (0, 1))")
     # On-policy demonstration arguments
+    parser.add_argument("--gate_mode", type=str, default="none", choices=["none", "wrong_only"],
+                        help="'wrong_only': apply the JSD loss only to rollouts with a wrong (and optionally "
+                             "different-from-context) final answer; failed rows are regenerated then masked")
+    parser.add_argument("--gate_max_regen_rounds", type=int, default=3,
+                        help="Fixed full-batch regeneration rounds to replace rollouts failing the gate")
+    parser.add_argument("--gate_require_diff_answer", type=parse_bool, default=True,
+                        help="Gated rollouts must differ (math-equivalence) from the 'wrong_answer' column")
+    parser.add_argument("--gate_gold_answer_key", type=str, default=None,
+                        help="Dataset column holding the scalar gold answer used for gate grading")
+    parser.add_argument("--gate_wrong_answer_key", type=str, default=None,
+                        help="Dataset column holding the in-context wrong answer used for gate grading")
     parser.add_argument("--use_onpolicy_demos", type=parse_bool, default=False,
                        help="Use correct on-policy completions as teacher demos instead of gold answers")
     parser.add_argument("--onpolicy_demo_reward_threshold", type=float, default=1.0,
@@ -178,6 +189,8 @@ def prepare_distil_dataset(
     gold_answer_key: str,
     teacher_prompt_template: str,
     seed: int = 42,
+    gate_gold_answer_key: str = None,
+    gate_wrong_answer_key: str = None,
 ) -> Dataset:
     """
     Prepare dataset for self-distillation training.
@@ -199,11 +212,18 @@ def prepare_distil_dataset(
         
         teacher_prompt_content = template.substitute(prompt=prompt, gold_answer=gold_answer)
         
-        return {
+        out = {
             "prompt": [{"role": "user", "content": prompt}],
             "teacher_prompt": [{"role": "user", "content": teacher_prompt_content}],
             "gold_answer": gold_answer,
         }
+        # Carry gate-grading columns through the mapping (all original columns are
+        # removed, so anything the wrong-only gate needs must be re-emitted here).
+        if gate_gold_answer_key:
+            out["gate_gold_answer"] = str(example.get(gate_gold_answer_key, ""))
+        if gate_wrong_answer_key:
+            out["wrong_answer"] = str(example.get(gate_wrong_answer_key, ""))
+        return out
     
     dataset = dataset.map(format_example, remove_columns=dataset.column_names)
     dataset = dataset.shuffle(seed=seed)
@@ -282,7 +302,21 @@ if __name__ == "__main__":
         gold_answer_key=args.gold_answer_key,
         teacher_prompt_template=args.teacher_prompt_template,
         seed=args.seed,
+        gate_gold_answer_key=args.gate_gold_answer_key,
+        gate_wrong_answer_key=args.gate_wrong_answer_key,
     )
+
+    if args.gate_mode != "none":
+        assert not args.speculative_generation, "gate_mode is incompatible with speculative_generation"
+        assert not args.splice_generation, "gate_mode is incompatible with splice_generation"
+        assert not args.generate_from_teacher, "gate_mode is incompatible with generate_from_teacher"
+        assert not args.use_critique, "gate_mode is incompatible with use_critique"
+        assert args.gate_gold_answer_key, "gate_mode requires --gate_gold_answer_key"
+        assert (not args.use_vllm) or (args.vllm_mode == "colocate" and args.vllm_tensor_parallel_size == 1), \
+            "gate_mode requires colocated vLLM with tensor_parallel_size=1 (or non-vLLM generation)"
+        logging.info(f"Wrong-rollout gate: ENABLED (mode={args.gate_mode}, "
+                     f"regen_rounds={args.gate_max_regen_rounds}, "
+                     f"require_diff_answer={args.gate_require_diff_answer})")
     
     logging.info(f"Dataset prepared with {len(train_dataset)} examples")
     if len(train_dataset) > 0:
@@ -339,6 +373,11 @@ if __name__ == "__main__":
         "use_onpolicy_demos": args.use_onpolicy_demos,
         "onpolicy_demo_reward_threshold": args.onpolicy_demo_reward_threshold,
         "strip_thinking_from_demo": args.strip_thinking_from_demo,
+
+        # Wrong-rollout gate settings (contrastive OPSD)
+        "gate_mode": args.gate_mode,
+        "gate_max_regen_rounds": args.gate_max_regen_rounds,
+        "gate_require_diff_answer": args.gate_require_diff_answer,
 
         # Critique-conditioned self-teaching settings
         "use_critique": args.use_critique,
