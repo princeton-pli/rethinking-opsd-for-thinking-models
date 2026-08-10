@@ -8,7 +8,10 @@ N = 512
 
 df = pd.read_parquet(SRC)
 print(f"source: {len(df)} rows, columns: {list(df.columns)}")
-sub = df.head(N).copy()
+# 84/15000 rows have null Answer (plus a few empty strings) — ungradeable, skip.
+ok = df["Answer"].notna() & (df["Answer"].astype(str).str.strip() != "")
+print(f"dropping {(~ok).sum()} rows with null/empty Answer")
+sub = df[ok].head(N).copy()
 
 # MathTask.get_gold reads lowercase 'answer' first; the OT parquet carries
 # capital-A 'Answer' (see GOLD_KEY=Answer in submit_experiment.sh). Mirror it
