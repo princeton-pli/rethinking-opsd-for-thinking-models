@@ -296,6 +296,27 @@ if __name__ == "__main__":
     
     # Load and prepare dataset
     raw_dataset = load_training_dataset(args)
+
+    if args.gate_mode != "none":
+        assert not args.speculative_generation, "gate_mode is incompatible with speculative_generation"
+        assert not args.splice_generation, "gate_mode is incompatible with splice_generation"
+        assert not args.generate_from_teacher, "gate_mode is incompatible with generate_from_teacher"
+        assert not args.use_critique, "gate_mode is incompatible with use_critique"
+        assert not args.use_onpolicy_demos, "gate_mode is incompatible with use_onpolicy_demos"
+        assert args.gate_gold_answer_key, "gate_mode requires --gate_gold_answer_key"
+        # A typo'd column name would silently grade every gold as "" and pass ALL
+        # rollouts (including correct ones) through the gate — fail loudly instead.
+        assert args.gate_gold_answer_key in raw_dataset.column_names, \
+            f"--gate_gold_answer_key '{args.gate_gold_answer_key}' not in dataset columns {raw_dataset.column_names}"
+        if args.gate_wrong_answer_key:
+            assert args.gate_wrong_answer_key in raw_dataset.column_names, \
+                f"--gate_wrong_answer_key '{args.gate_wrong_answer_key}' not in dataset columns {raw_dataset.column_names}"
+        assert (not args.use_vllm) or (args.vllm_mode == "colocate" and args.vllm_tensor_parallel_size == 1), \
+            "gate_mode requires colocated vLLM with tensor_parallel_size=1 (or non-vLLM generation)"
+        logging.info(f"Wrong-rollout gate: ENABLED (mode={args.gate_mode}, "
+                     f"regen_rounds={args.gate_max_regen_rounds}, "
+                     f"require_diff_answer={args.gate_require_diff_answer})")
+
     train_dataset = prepare_distil_dataset(
         raw_dataset,
         prompt_key=args.prompt_key,
@@ -305,18 +326,6 @@ if __name__ == "__main__":
         gate_gold_answer_key=args.gate_gold_answer_key,
         gate_wrong_answer_key=args.gate_wrong_answer_key,
     )
-
-    if args.gate_mode != "none":
-        assert not args.speculative_generation, "gate_mode is incompatible with speculative_generation"
-        assert not args.splice_generation, "gate_mode is incompatible with splice_generation"
-        assert not args.generate_from_teacher, "gate_mode is incompatible with generate_from_teacher"
-        assert not args.use_critique, "gate_mode is incompatible with use_critique"
-        assert args.gate_gold_answer_key, "gate_mode requires --gate_gold_answer_key"
-        assert (not args.use_vllm) or (args.vllm_mode == "colocate" and args.vllm_tensor_parallel_size == 1), \
-            "gate_mode requires colocated vLLM with tensor_parallel_size=1 (or non-vLLM generation)"
-        logging.info(f"Wrong-rollout gate: ENABLED (mode={args.gate_mode}, "
-                     f"regen_rounds={args.gate_max_regen_rounds}, "
-                     f"require_diff_answer={args.gate_require_diff_answer})")
     
     logging.info(f"Dataset prepared with {len(train_dataset)} examples")
     if len(train_dataset) > 0:
