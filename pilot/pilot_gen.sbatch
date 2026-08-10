@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=80G
 #SBATCH --time=6:00:00
-#SBATCH --output=pilot/slurm-%j.out
+#SBATCH --output=/scratch/gpfs/ARORA/arora/opsd/pilot/slurm-%j.out
 #
 # Harvest pass: k=8 student samples per problem on the 512-problem pilot
 # subset, Qwen3-4B, training-time sampling params (T=1.0, top-p 1.0, top-k 50).

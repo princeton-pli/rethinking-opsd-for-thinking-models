@@ -8,11 +8,14 @@
 #   x+ = shortest correct visible solution (think-stripped)
 #   x- = shortest visible solution among those ending in the MODAL wrong answer
 import json
+import os
 import re
 import sys
 import collections
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evaluation.utils import extract_answer_math, strip_string
+from evaluation.grader import math_equal
 
 THINK_RE = re.compile(r"<think>[\s\S]*?</think>")
 
@@ -41,11 +44,12 @@ for qid, gens in sorted(by_q.items()):
     for r in gens:
         resp = r["response"]
         gen_stats["total"] += 1
-        # A usable demo needs a closed think block and non-empty visible text.
+        # A usable demo needs non-empty visible text and, if a think block was
+        # opened, a closed one (truncated-mid-think responses are unusable).
         visible = THINK_RE.sub("", resp).strip()
-        completed = "</think>" in resp and len(visible) > 0
+        completed = len(visible) > 0 and ("<think>" not in resp or "</think>" in resp)
         pred = extract_answer_math(resp)
-        if pred is None or pred == "":
+        if not pred:
             gen_stats["no_answer"] += 1
             continue
         if r.get("is_correct"):
@@ -54,12 +58,18 @@ for qid, gens in sorted(by_q.items()):
                 correct_pool.append((len(visible), visible))
         else:
             gen_stats["wrong"] += 1
+            # Bucket by math equivalence, not string identity: 0.5 and 1/2 are
+            # one wrong answer for both the >=2-distinct screen and modal counts.
             norm = strip_string(str(pred))
+            for rep in wrong_by_answer:
+                if math_equal(norm, rep, timeout=True):
+                    norm = rep
+                    break
             if completed:
                 wrong_by_answer[norm].append((len(visible), visible))
 
     n_correct = sum(1 for r in gens if r.get("is_correct"))
-    n_correct_hist[n_correct] += 1
+    n_correct_hist[(n_correct, len(gens))] += 1
     distinct_wrong = len(wrong_by_answer)
 
     has_pos = len(correct_pool) >= 1
@@ -81,7 +91,8 @@ for qid, gens in sorted(by_q.items()):
             "question_id": qid,
             "problem": raw.get("problem", ""),
             "gold_answer": raw.get("gold_answer", ""),
-            "n_correct_of_8": n_correct,
+            "n_correct": n_correct,
+            "n_gens": len(gens),
             "wrong_answer_counts": {k: len(v) for k, v in wrong_by_answer.items()},
             "x_plus": x_plus,
             "x_minus": x_minus,
@@ -89,9 +100,12 @@ for qid, gens in sorted(by_q.items()):
         })
 
 nq = len(by_q)
-print(f"\nquestions: {nq}")
-print(f"solve rate (mean correct/8): {sum(k * v for k, v in n_correct_hist.items()) / (8 * nq):.3f}")
-print(f"n_correct histogram: {dict(sorted(n_correct_hist.items()))}")
+if nq == 0:
+    sys.exit("no rows parsed — wrong path or empty file")
+total_gens = sum(len(g) for g in by_q.values())
+print(f"\nquestions: {nq} (generations: {total_gens}; expect 8/question)")
+print(f"solve rate (mean correct/gens): {sum(nc * v for (nc, _), v in n_correct_hist.items()) / total_gens:.3f}")
+print(f"(n_correct, n_gens) histogram: {dict(sorted(n_correct_hist.items()))}")
 print(f"generations: {dict(gen_stats)}")
 for k in ("ge1_correct", "ge2_distinct_wrong", "usable"):
     print(f"{k}: {frac_stats[k]}/{nq} = {frac_stats[k] / nq:.3f}")

@@ -15,8 +15,12 @@ sub = df.head(N).copy()
 # so grading uses the clean gold instead of falling back to solution parsing.
 if "answer" not in sub.columns:
     assert "Answer" in sub.columns, f"expected 'Answer' column, have {list(sub.columns)}"
+    assert sub["Answer"].notna().all(), "null Answer rows would grade as string 'None'"
     sub["answer"] = sub["Answer"].astype(str)
 
 assert "problem" in sub.columns, "expected 'problem' column"
+# run_generate merges every raw column into each of the 4096 JSONL rows; drop
+# the heavy ones (full R1 traces etc.) so the harvest output stays small.
+sub = sub[["problem", "answer"]]
 sub.to_parquet(DST, index=False)
 print(f"wrote {len(sub)} rows -> {DST}")
