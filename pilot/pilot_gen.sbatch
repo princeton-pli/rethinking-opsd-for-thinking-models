@@ -18,14 +18,20 @@ cd /scratch/gpfs/ARORA/arora/opsd
 source slurm/cluster_env.sh
 source envs/train/.venv/bin/activate
 
+# Model and dataset are overridable so the same script serves every pilot:
+#   sbatch --export=ALL,PILOT_MODEL=Qwen3-1.7B pilot/pilot_gen.sbatch
+PILOT_MODEL=${PILOT_MODEL:-Qwen3-4B}
+PILOT_DATASET=${PILOT_DATASET:-data/raw/ot15k_pilot512.parquet}
+OUT_DIR=pilot/${PILOT_MODEL}
+
 # run_generate.py embeds the --dataset path in its output filename, so the
 # nested dir must exist under output_dir before the shard writer opens it.
-mkdir -p pilot/data/raw
+mkdir -p "${OUT_DIR}/$(dirname "${PILOT_DATASET}")"
 
 python run_generate.py \
-    --model_name /scratch/gpfs/ARORA/skaur/models/Qwen3-4B \
-    --dataset data/raw/ot15k_pilot512.parquet \
-    --output_dir pilot \
+    --model_name /scratch/gpfs/ARORA/skaur/models/${PILOT_MODEL} \
+    --dataset "${PILOT_DATASET}" \
+    --output_dir "${OUT_DIR}" \
     --batch_size 64 \
     --max_tokens 16384 \
     --temperature 1.0 --top_p 1.0 --top_k 50 \
