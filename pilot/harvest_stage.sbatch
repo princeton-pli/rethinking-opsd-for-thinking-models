@@ -45,5 +45,22 @@ rc=0
 for p in "${pids[@]}"; do
     wait "$p" || rc=1
 done
-[ $rc -eq 0 ] && echo "HARVEST STAGE DONE" || echo "HARVEST STAGE FAILED (see shard logs)"
+
+# Shard 0's supervisor gives up polling after ~5.5h of shard skew; guarantee the
+# merge here so "DONE" always implies a merged JSONL exists. (H_DATASET must be
+# a relative path — an absolute one would make run_generate write next to the
+# parquet instead of into H_OUTDIR.)
+MERGED="${H_OUTDIR}/${H_DATASET}-temp_1.0-top_p_1.0.jsonl"
+if [ ! -f "${MERGED}" ]; then
+    python run_generate.py --model_name /scratch/gpfs/ARORA/skaur/models/${H_MODEL} \
+        --dataset "${H_DATASET}" --output_dir "${H_OUTDIR}" \
+        --temperature 1.0 --top_p 1.0 \
+        --num_shards 8 --shard_id 0 --merge_only || rc=1
+fi
+if [ $rc -eq 0 ] && [ -f "${MERGED}" ]; then
+    echo "HARVEST STAGE DONE"
+else
+    echo "HARVEST STAGE FAILED (see shard logs)"
+    rc=1
+fi
 exit $rc
