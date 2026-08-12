@@ -26,7 +26,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lo", type=float, default=5, help="difficulty band lower bound (inclusive)")
     ap.add_argument("--hi", type=float, default=7, help="difficulty band upper bound (inclusive)")
-    ap.add_argument("--n", type=int, default=512)
+    ap.add_argument("--n", type=int, default=512, help="subset size; 0 = the whole band")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--output", type=str, default="data/raw/deepmath_pilot512.parquet")
     args = ap.parse_args()
@@ -42,7 +42,10 @@ def main():
     band = df[(df[d_col] >= args.lo) & (df[d_col] <= args.hi)].copy()
     band = band[band[a_col].notna() & (band[a_col].astype(str).str.strip() != "")]
     print(f"band [{args.lo}, {args.hi}]: {len(band)} rows")
-    sub = band.sample(n=min(args.n, len(band)), random_state=args.seed).reset_index(drop=True)
+    if args.n > 0:
+        sub = band.sample(n=min(args.n, len(band)), random_state=args.seed).reset_index(drop=True)
+    else:
+        sub = band.sample(frac=1.0, random_state=args.seed).reset_index(drop=True)
 
     out = pd.DataFrame({
         "problem": sub[q_col].astype(str).str.rstrip() + " " + BOXED_INSTRUCTION,
