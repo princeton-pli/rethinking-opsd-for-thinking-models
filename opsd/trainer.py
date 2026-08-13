@@ -809,11 +809,17 @@ class DistilTrainer(BaseTrainer):
             logits = logits / temperature
 
             completion_ids = input_ids_batch[:, -logits_to_keep:]
-            selected_logps = selective_log_softmax(logits, completion_ids)  # compute logprobs
             if compute_all_logps:
                 logps = log_softmax(logits, dim=-1)
+                # Gather from the full log-softmax we just computed instead of calling
+                # selective_log_softmax, which would run a SECOND vocab-wide softmax and
+                # (via autograd) retain another (B, T, V) fp32 tensor -- ~10 GB at
+                # T=16384, V=151936. Mathematically identical: selective_log_softmax is
+                # documented as equivalent to exactly this gather.
+                selected_logps = logps.gather(dim=-1, index=completion_ids.unsqueeze(-1)).squeeze(-1)
             else:
                 logps = None
+                selected_logps = selective_log_softmax(logits, completion_ids)  # compute logprobs
             all_selected_logps.append(selected_logps)
             all_logps.append(logps)
 

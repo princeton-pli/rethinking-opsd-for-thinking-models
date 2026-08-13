@@ -1,31 +1,31 @@
 #!/bin/bash
 #SBATCH --job-name=opsd_smoke
 #SBATCH --partition=pli-c
-#SBATCH --gres=gpu:h100:2
-#SBATCH --cpus-per-task=24
-#SBATCH --mem=160G
+#SBATCH --gres=gpu:h100:8
+#SBATCH --cpus-per-task=96
+#SBATCH --mem=640G
 #SBATCH --time=4:00:00
 #SBATCH --output=/scratch/gpfs/ARORA/arora/opsd/pilot/slurm-%j.out
 #
-# Gated-trainer smoke test on TWO GPUs. Two, not one: single-GPU FSDP is a
-# degenerate config the paper never ran, and it breaks the stock FSDP->vLLM weight
-# sync (_sync_fsdp1_params_to_vllm summons submodules post-order before the root
-# is lazily initialized -> "Non-root FSDP instance's _is_root" assertion, seen
-# 2026-08-13 job 12339899). Two ranks exercise real sharding.
+# Gated-trainer smoke test at the REAL Arm-1 shape: 8 GPUs.
 #
-# Two GPUs is also the STRICTER memory bar: peak = per-micro-batch tensors (the
-# full-vocab logits/JSD region, identical at any GPU count since micro-batch is 1)
-# + FSDP-sharded model state, and that state shards by 2 here vs by 8 in the real
-# Arm-1 job -- roughly +18 GB/GPU. So a pass here implies a pass at 8 GPUs.
-# accum=4 (not 64) makes each step ~16x cheaper without changing peak memory:
-# gradients accumulate into the same buffers and per-micro-batch tensors are freed.
+# History: 1 GPU broke the stock FSDP->vLLM weight sync (single-GPU FSDP is
+# degenerate; "Non-root FSDP instance's _is_root" assertion, job 12339899). At
+# 2 GPUs every rung OOM'd -- but 2-rank FSDP carries ~15-18 GB/GPU MORE model
+# state than 8-rank, which is exactly the headroom the loss region needs, so
+# 2 GPUs was too strict a bar rather than a conservative one. 8 GPUs is both the
+# real configuration and the only one whose verdict transfers directly.
+#
+# accum=2 (not 64) makes each step ~32x cheaper without changing peak memory:
+# gradients accumulate into the same buffers and per-micro-batch tensors are
+# freed. Effective batch here is 8x1x2=16, so 3 steps needs >=48 problems.
 #
 # Because della jobs queue sequentially, this walks a LADDER inside one
 # allocation instead of failing and re-queuing:
-#   A  cap 16384, stock config          <- the configuration we actually want
-#   B  cap 16384, vLLM sleep + 0.20 mem <- config levers only
-#   C  cap 12288, vLLM sleep + 0.20 mem <- shorter rollouts, some truncation tax
-#   D  cap  8192, vLLM sleep + 0.20 mem <- paper-adjacent fallback
+#   A  cap 16384, jsd_chunk 1024  <- the configuration we actually want
+#   B  cap 16384, jsd_chunk  512  <- halve the in-checkpoint backward peak
+#   C  cap 12288, jsd_chunk 1024
+#   D  cap  8192, jsd_chunk 1024  <- paper-adjacent fallback
 # First rung that survives 3 optimizer steps wins; its name lands in SMOKE_RESULT.
 # What we read off a surviving rung: peak GPU memory, gate/live_fraction,
 # gate/regen_rounds, and step wall-time (for sizing the Arm-1 job).
@@ -39,10 +39,10 @@ export WANDB_MODE=disabled WANDB_DISABLED=true
 RESULT=pilot/SMOKE_RESULT
 : > "${RESULT}"
 
-run_rung() {  # run_rung <name> <completion_cap> <vllm_mem_util> <sleep_mode>
-    local name=$1 cap=$2 mem=$3 sleep_mode=$4
+run_rung() {  # run_rung <name> <completion_cap> <vllm_mem_util> <sleep_mode> <jsd_chunk>
+    local name=$1 cap=$2 mem=$3 sleep_mode=$4 chunk=$5
     local log=pilot/smoke_${name}.log
-    echo "=== RUNG ${name}: cap=${cap} vllm_mem=${mem} sleep=${sleep_mode} ==="
+    echo "=== RUNG ${name}: cap=${cap} vllm_mem=${mem} sleep=${sleep_mode} jsd_chunk=${chunk} ==="
     # Sample GPU memory in the background so a surviving rung reports its peak.
     ( while true; do nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits; sleep 10; done \
         > "pilot/smoke_${name}.mem" 2>/dev/null ) &
@@ -64,11 +64,12 @@ run_rung() {  # run_rung <name> <completion_cap> <vllm_mem_util> <sleep_mode>
     OPSD_MAX_PROMPT_LENGTH=4096 \
     OPSD_MAX_COMPLETION_LENGTH="${cap}" \
     OPSD_MICRO_BATCH_SIZE=1 \
-    OPSD_GRADIENT_ACCUM=4 \
+    OPSD_GRADIENT_ACCUM=2 \
     OPSD_LR=5e-6 \
     OPSD_EPOCHS=1 \
     VLLM_GPU_MEM_UTIL="${mem}" \
     VLLM_SLEEP_MODE="${sleep_mode}" \
+    JSD_CHUNK_SIZE="${chunk}" \
     OPSD_REPORT_TO=none \
     MAX_STEPS=3 \
         bash slurm/train.sh > "${log}" 2>&1
@@ -93,7 +94,7 @@ run_rung() {  # run_rung <name> <completion_cap> <vllm_mem_util> <sleep_mode>
     return 2
 }
 
-for rung in "A 16384 0.30 True" "B 16384 0.20 True" "C 12288 0.20 True" "D 8192 0.20 True"; do
+for rung in "A 16384 0.30 True 1024" "B 16384 0.20 True 512" "C 12288 0.20 True 1024" "D 8192 0.20 True 1024"; do
     # shellcheck disable=SC2086
     run_rung $rung
     rc=$?

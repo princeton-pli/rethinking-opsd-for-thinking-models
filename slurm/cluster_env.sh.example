@@ -22,3 +22,8 @@ export PYTHONUSERBASE=/dev/null
 export PYTHONUNBUFFERED=1
 # export UV_CACHE_DIR=/scratch/gpfs/<group>/$USER/.cache/uv
 # export HF_HOME=/scratch/gpfs/<group>/$USER/.cache/huggingface
+
+# Chunked-JSD training allocates/frees ~10 GB fp32 blocks many times per backward
+# (slice_backward materializes a full (B,T,V) zero tensor per chunk). Without
+# expandable segments this fragments the allocator into OOM at ~78/80 GB used.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
