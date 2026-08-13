@@ -22,10 +22,13 @@
 #
 # Because della jobs queue sequentially, this walks a LADDER inside one
 # allocation instead of failing and re-queuing:
-#   A  cap 16384, jsd_chunk 1024  <- the configuration we actually want
-#   B  cap 16384, jsd_chunk  512  <- halve the in-checkpoint backward peak
-#   C  cap 12288, jsd_chunk 1024
-#   D  cap  8192, jsd_chunk 1024  <- paper-adjacent fallback
+# GENERATION stays at 16384 on every rung -- the gate needs a final answer, and
+# at a 4096 cap 95% of rollouts on this data never reach one. What varies is the
+# LOSS length, which is what actually drives memory:
+#   A  loss 4096, jsd_chunk 1024  <- paper's exact loss-token budget; want this
+#   B  loss 6144, jsd_chunk 1024  <- more supervised tokens if A has headroom
+#   C  loss 4096, jsd_chunk  512  <- halve the in-checkpoint backward peak
+#   D  loss 2048, jsd_chunk 1024  <- fallback
 # First rung that survives 3 optimizer steps wins; its name lands in SMOKE_RESULT.
 # What we read off a surviving rung: peak GPU memory, gate/live_fraction,
 # gate/regen_rounds, and step wall-time (for sizing the Arm-1 job).
@@ -39,10 +42,10 @@ export WANDB_MODE=disabled WANDB_DISABLED=true
 RESULT=pilot/SMOKE_RESULT
 : > "${RESULT}"
 
-run_rung() {  # run_rung <name> <completion_cap> <vllm_mem_util> <sleep_mode> <jsd_chunk>
-    local name=$1 cap=$2 mem=$3 sleep_mode=$4 chunk=$5
+run_rung() {  # run_rung <name> <gen_cap> <vllm_mem_util> <sleep_mode> <jsd_chunk> <loss_tokens>
+    local name=$1 cap=$2 mem=$3 sleep_mode=$4 chunk=$5 loss_tokens=$6
     local log=pilot/smoke_${name}.log
-    echo "=== RUNG ${name}: cap=${cap} vllm_mem=${mem} sleep=${sleep_mode} jsd_chunk=${chunk} ==="
+    echo "=== RUNG ${name}: gen_cap=${cap} loss_tokens=${loss_tokens} vllm_mem=${mem} sleep=${sleep_mode} jsd_chunk=${chunk} ==="
     # Sample GPU memory in the background so a surviving rung reports its peak.
     ( while true; do nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits; sleep 10; done \
         > "pilot/smoke_${name}.mem" 2>/dev/null ) &
@@ -70,6 +73,7 @@ run_rung() {  # run_rung <name> <completion_cap> <vllm_mem_util> <sleep_mode> <j
     VLLM_GPU_MEM_UTIL="${mem}" \
     VLLM_SLEEP_MODE="${sleep_mode}" \
     JSD_CHUNK_SIZE="${chunk}" \
+    LOSS_MAX_COMPLETION_TOKENS="${loss_tokens}" \
     OPSD_REPORT_TO=none \
     MAX_STEPS=3 \
         bash slurm/train.sh > "${log}" 2>&1
@@ -94,7 +98,7 @@ run_rung() {  # run_rung <name> <completion_cap> <vllm_mem_util> <sleep_mode> <j
     return 2
 }
 
-for rung in "A 16384 0.30 True 1024" "B 16384 0.20 True 512" "C 12288 0.20 True 1024" "D 8192 0.20 True 1024"; do
+for rung in "A 16384 0.30 True 1024 4096" "B 16384 0.20 True 1024 6144" "C 16384 0.20 True 512 4096" "D 16384 0.20 True 1024 2048"; do
     # shellcheck disable=SC2086
     run_rung $rung
     rc=$?

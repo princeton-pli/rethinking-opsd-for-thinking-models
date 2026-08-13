@@ -717,6 +717,18 @@ class DistilConfig(TrainingArguments):
         },
     )
 
+    loss_max_completion_tokens: int = field(
+        default=0,
+        metadata={
+            "help": "Compute the distillation loss on only the first N tokens of each rollout "
+            "(0 = all generated tokens, the paper's behaviour). Decouples loss length from "
+            "generation length: generation must be long enough for a correctness gate to read a "
+            "final answer, but each loss position costs a vocab-wide (B, T, V) fp32 tensor. Since "
+            "generation is autoregressive, the first N tokens of a long rollout are distributed "
+            "identically to an N-capped rollout, so N=4096 reproduces the paper's loss-token "
+            "budget exactly while still allowing max_completion_length=16384 for grading."
+        },
+    )
     jsd_chunk_size: int = field(
         default=0,
         metadata={

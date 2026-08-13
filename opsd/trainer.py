@@ -2365,6 +2365,25 @@ class DistilTrainer(BaseTrainer):
         if gate_live_mask is not None:
             completion_mask = completion_mask * gate_live_mask.unsqueeze(1).int()
 
+        # Decouple LOSS length from GENERATION length.
+        #
+        # Generation has to run long enough for the gate to read a final answer
+        # (median rollout on the Arm-1 data is ~10.9k tokens; at a 4096 cap 95% of
+        # them never reach \boxed{}). But every position that enters the loss costs
+        # a vocab-wide (B, T, V) fp32 tensor, and that is the whole memory problem.
+        # Generation is autoregressive, so the first L tokens of a long rollout are
+        # distributed identically to an L-capped rollout: setting L = 4096 gives
+        # exactly the paper's loss-token budget while the gate still sees the
+        # completed answer. Truncation here is not "throwing the rollout away" --
+        # the paper likewise trains on truncated rollouts (mask_truncated_completions
+        # defaults False and is never set), it just never sees past its own cap.
+        loss_tokens = int(getattr(self.args, "loss_max_completion_tokens", 0) or 0)
+        if loss_tokens > 0 and completion_ids.size(1) > loss_tokens:
+            completion_ids = completion_ids[:, :loss_tokens]
+            completion_mask = completion_mask[:, :loss_tokens]
+            if sampling_per_token_logps is not None:
+                sampling_per_token_logps = sampling_per_token_logps[:, :loss_tokens]
+
         # Concatenate prompt_mask with completion_mask for logit computation
         prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)  # (B, P+C)
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B, P+C)

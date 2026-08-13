@@ -126,6 +126,9 @@ def parse_args():
     parser.add_argument("--splice_k", type=float, default=0.5,
                         help="Fraction of Pass 1 tokens used as prefix for Pass 2 (in (0, 1))")
     # On-policy demonstration arguments
+    parser.add_argument("--loss_max_completion_tokens", type=int, default=0,
+                        help="Compute the loss on only the first N rollout tokens (0=all). "
+                             "Decouples loss length from generation length.")
     parser.add_argument("--jsd_chunk_size", type=int, default=0,
                         help="Chunk the per-token JSD over this many sequence positions (0=off). "
                              "Exact; cuts the loss-region memory peak by ~T/chunk.")
@@ -389,6 +392,7 @@ if __name__ == "__main__":
         "onpolicy_demo_reward_threshold": args.onpolicy_demo_reward_threshold,
         "strip_thinking_from_demo": args.strip_thinking_from_demo,
 
+        "loss_max_completion_tokens": args.loss_max_completion_tokens,
         "jsd_chunk_size": args.jsd_chunk_size,
 
         # Wrong-rollout gate settings (contrastive OPSD)
