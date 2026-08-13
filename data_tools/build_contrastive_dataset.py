@@ -14,6 +14,7 @@
 import argparse
 import json
 import random
+import re
 
 import pandas as pd
 
@@ -26,11 +27,27 @@ TEMPLATE = (
 )
 
 
+BINARY = {"yes", "no", "true", "false"}
+SYNONYM = {("yes", "true"), ("true", "yes"), ("no", "false"), ("false", "no")}
+_WRAPPER = re.compile(r"\\(mathbb|mathrm|text|mathcal|mathbf|left|right|displaystyle)\s*")
+
+
+def _norm(s):
+    """Aggressive normalization used only to DETECT grader false negatives."""
+    s = _WRAPPER.sub("", str(s))
+    for ch in "{}$ ":
+        s = s.replace(ch, "")
+    return s.replace("\\", "").replace("dfrac", "frac").replace("tfrac", "frac").strip().lower()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pool", required=True, help="pool JSONL from pilot_coverage.py")
     ap.add_argument("--output", required=True, help="output parquet path")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--limit", type=int, default=0, help="keep only the first N rows (smoke runs)")
+    ap.add_argument("--keep_binary", action="store_true",
+                    help="keep Yes/No-answer problems (default: drop them)")
     args = ap.parse_args()
 
     rows = []
@@ -38,6 +55,28 @@ def main():
         for line in f:
             rows.append(json.loads(line))
     print(f"{len(rows)} pool rows loaded")
+
+    # Quality filters, both established from the 2026-08-13 DeepMath pool audit:
+    #  (a) binary-answer problems give a degenerate contrastive signal (x- differs
+    #      from x+ by one word) and a ~50% guess rate makes the gate's label noise;
+    #  (b) x- whose answer normalizes to gold is a grader FALSE NEGATIVE — a correct
+    #      response mislabeled wrong (math_equal misses \mathbb{Z} vs Z, Yes vs True).
+    n_bin = n_fn = 0
+    kept = []
+    for r in rows:
+        g, w = str(r["gold_answer"]).strip(), str(r["x_minus_answer"]).strip()
+        if not args.keep_binary and g.strip("$").lower() in BINARY:
+            n_bin += 1
+            continue
+        if _norm(g) == _norm(w) or (g.lower(), w.lower()) in SYNONYM:
+            n_fn += 1
+            continue
+        kept.append(r)
+    print(f"dropped {n_bin} binary-answer, {n_fn} grader-false-negative -> {len(kept)} rows")
+    rows = kept
+    if args.limit:
+        rows = rows[: args.limit]
+        print(f"limited to {len(rows)} rows")
 
     rng = random.Random(args.seed)
     out = []

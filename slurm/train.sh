@@ -156,6 +156,7 @@ train() {
         --per_device_train_batch_size="${OPSD_MICRO_BATCH_SIZE}" \
         --gradient_accumulation_steps="${OPSD_GRADIENT_ACCUM}" \
         --num_train_epochs="${OPSD_EPOCHS}" \
+        --max_steps="${MAX_STEPS:--1}" \
         --learning_rate="${OPSD_LR}" \
         --warmup_ratio="${WARMUP_RATIO:-0.03}" \
         --lr_scheduler_type="cosine" \
@@ -168,6 +169,8 @@ train() {
         --fsdp="full_shard auto_wrap" \
         --fsdp_config="${FSDP_CONFIG}" \
         --use_vllm="${USE_VLLM}" \
+        --vllm_gpu_memory_utilization="${VLLM_GPU_MEM_UTIL:-0.3}" \
+        --vllm_enable_sleep_mode="${VLLM_SLEEP_MODE:-True}" \
         ${TEACHER_PROMPT_TEMPLATE:+--teacher_prompt_template="${TEACHER_PROMPT_TEMPLATE}"} \
         ${FORCE_THINKING_PREFIX:+--force_thinking_prefix="${FORCE_THINKING_PREFIX}"} \
         --gate_mode="${GATE_MODE}" \
