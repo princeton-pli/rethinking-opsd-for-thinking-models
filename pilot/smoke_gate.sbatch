@@ -1,18 +1,24 @@
 #!/bin/bash
 #SBATCH --job-name=opsd_smoke
 #SBATCH --partition=pli-c
-#SBATCH --gres=gpu:h100:1
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=80G
+#SBATCH --gres=gpu:h100:2
+#SBATCH --cpus-per-task=24
+#SBATCH --mem=160G
 #SBATCH --time=4:00:00
 #SBATCH --output=/scratch/gpfs/ARORA/arora/opsd/pilot/slurm-%j.out
 #
-# Gated-trainer smoke test on ONE GPU. Peak GPU memory is set by MICRO-batch (1),
-# not by GPU count or accumulation depth: gradients accumulate into the same
-# buffers, and the big per-micro-batch tensors (the full-vocab logits/JSD region)
-# are freed after each backward. So micro_batch=1 here reproduces the exact
-# per-GPU memory profile of the 8-GPU Arm-1 job, and accum=4 (instead of 64) makes
-# each optimizer step ~16x cheaper without changing the memory verdict.
+# Gated-trainer smoke test on TWO GPUs. Two, not one: single-GPU FSDP is a
+# degenerate config the paper never ran, and it breaks the stock FSDP->vLLM weight
+# sync (_sync_fsdp1_params_to_vllm summons submodules post-order before the root
+# is lazily initialized -> "Non-root FSDP instance's _is_root" assertion, seen
+# 2026-08-13 job 12339899). Two ranks exercise real sharding.
+#
+# Two GPUs is also the STRICTER memory bar: peak = per-micro-batch tensors (the
+# full-vocab logits/JSD region, identical at any GPU count since micro-batch is 1)
+# + FSDP-sharded model state, and that state shards by 2 here vs by 8 in the real
+# Arm-1 job -- roughly +18 GB/GPU. So a pass here implies a pass at 8 GPUs.
+# accum=4 (not 64) makes each step ~16x cheaper without changing peak memory:
+# gradients accumulate into the same buffers and per-micro-batch tensors are freed.
 #
 # Because della jobs queue sequentially, this walks a LADDER inside one
 # allocation instead of failing and re-queuing:
@@ -63,7 +69,6 @@ run_rung() {  # run_rung <name> <completion_cap> <vllm_mem_util> <sleep_mode>
     OPSD_EPOCHS=1 \
     VLLM_GPU_MEM_UTIL="${mem}" \
     VLLM_SLEEP_MODE="${sleep_mode}" \
-    GPU_COUNT=1 \
     OPSD_REPORT_TO=none \
     MAX_STEPS=3 \
         bash slurm/train.sh > "${log}" 2>&1
