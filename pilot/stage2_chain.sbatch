@@ -16,7 +16,7 @@
 # Sentinel: harvest/PIPELINE_DONE (or PIPELINE_FAILED with the failing step).
 
 set -uo pipefail
-cd /scratch/gpfs/ARORA/arora/opsd
+cd /scratch/gpfs/ARORA/arora/opsd || exit 1
 source slurm/cluster_env.sh
 source envs/train/.venv/bin/activate
 
@@ -42,7 +42,7 @@ for shard in 0 1 2 3 4 5 6 7; do
         --max_tokens 16384 \
         --temperature 1.0 --top_p 1.0 --top_k 50 \
         --num_generation 5 \
-        --num_shards 8 --shard_id ${shard} \
+        --num_shards 8 --shard_id ${shard} --skip_merge \
         > "${STAGE2_OUT}/shard_${shard}.log" 2>&1 &
     pids+=($!)
 done
