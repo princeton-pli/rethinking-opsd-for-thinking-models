@@ -126,6 +126,9 @@ def parse_args():
     parser.add_argument("--splice_k", type=float, default=0.5,
                         help="Fraction of Pass 1 tokens used as prefix for Pass 2 (in (0, 1))")
     # On-policy demonstration arguments
+    parser.add_argument("--jsd_chunk_size", type=int, default=0,
+                        help="Chunk the per-token JSD over this many sequence positions (0=off). "
+                             "Exact; cuts the loss-region memory peak by ~T/chunk.")
     parser.add_argument("--gate_mode", type=str, default="none", choices=["none", "wrong_only"],
                         help="'wrong_only': apply the JSD loss only to rollouts with a wrong (and optionally "
                              "different-from-context) final answer; failed rows are regenerated then masked")
@@ -385,6 +388,8 @@ if __name__ == "__main__":
         "use_onpolicy_demos": args.use_onpolicy_demos,
         "onpolicy_demo_reward_threshold": args.onpolicy_demo_reward_threshold,
         "strip_thinking_from_demo": args.strip_thinking_from_demo,
+
+        "jsd_chunk_size": args.jsd_chunk_size,
 
         # Wrong-rollout gate settings (contrastive OPSD)
         "gate_mode": args.gate_mode,

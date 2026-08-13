@@ -1,6 +1,7 @@
 # adapted from https://github.com/idanshen/Self-Distillation
 
 import inspect
+import math
 import os
 import re
 
@@ -75,6 +76,7 @@ from trl.trainer.utils import (
     unsplit_pixel_values_by_grid,
 )
 from torch.nn.functional import log_softmax, kl_div
+from torch.utils.checkpoint import checkpoint
 
 
 if is_peft_available():
@@ -1887,6 +1889,54 @@ class DistilTrainer(BaseTrainer):
 
         return critiques
 
+    def _jsd_per_token(self, student_logps, teacher_logps):
+        """Per-token divergence already summed over the vocab: (B, T, V) -> (B, T).
+
+        Mathematically identical to the original inline block, but never builds the
+        (2, B, T, V) `torch.stack`: `logaddexp` computes log((1-a)p_s + a p_t)
+        elementwise. Summing over V inside this function (rather than returning a
+        (B, T, V) `kl_loss`) is what makes the result chunkable over T.
+        """
+        if self.alpha == 0:  # forward KL
+            return kl_div(student_logps, teacher_logps, reduction="none", log_target=True).sum(-1)
+        if self.alpha == 1:  # reverse KL
+            return kl_div(teacher_logps, student_logps, reduction="none", log_target=True).sum(-1)
+        alpha = self.alpha
+        mixture_log_probs = torch.logaddexp(
+            student_logps + math.log(1.0 - alpha),
+            teacher_logps + math.log(alpha),
+        )
+        kl_teacher = kl_div(mixture_log_probs, teacher_logps, reduction="none", log_target=True).sum(-1)
+        kl_student = kl_div(mixture_log_probs, student_logps, reduction="none", log_target=True).sum(-1)
+        return alpha * kl_teacher + (1.0 - alpha) * kl_student
+
+    def _jsd_per_token_chunked(self, student_logps, teacher_logps):
+        """`_jsd_per_token` evaluated in slices along the sequence axis.
+
+        The JSD block is the memory peak of this trainer: it materializes ~9
+        vocab-sized fp32 tensors (B, T, V) only to immediately reduce over V. At
+        V=151936 and T=16384 that is ~9.3 GiB each -- the 2026-08-13 smoke run
+        OOM'd at every rung down to T=8192 on this line. Chunking over T with
+        activation checkpointing keeps only one slice's intermediates alive
+        (recomputed in backward), cutting the peak by roughly T/chunk. Exact:
+        no top-k truncation, no approximation -- important here because this
+        experiment studies high-entropy forking positions, where any support
+        truncation would bias precisely the tokens under study.
+        """
+        chunk = int(getattr(self.args, "jsd_chunk_size", 0) or 0)
+        T = student_logps.size(1)
+        if chunk <= 0 or T <= chunk:
+            return self._jsd_per_token(student_logps, teacher_logps)
+        parts = []
+        for start in range(0, T, chunk):
+            end = min(start + chunk, T)
+            s_slice, t_slice = student_logps[:, start:end], teacher_logps[:, start:end]
+            if torch.is_grad_enabled() and s_slice.requires_grad:
+                parts.append(checkpoint(self._jsd_per_token, s_slice, t_slice, use_reentrant=False))
+            else:
+                parts.append(self._jsd_per_token(s_slice, t_slice))
+        return torch.cat(parts, dim=1)
+
     def _gate_status(self, completion_ids_list, gold_answers, wrong_answers):
         """Wrong-only gate: True where a completion is (a) terminated (not truncated),
         (b) gradeable, (c) incorrect vs the gold answer, and (d) when
@@ -2557,27 +2607,12 @@ class DistilTrainer(BaseTrainer):
                 torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1
             )
         
-        # Compute KL divergences using F.kl_div
-        # PyTorch differs from the standard mathematical definition, so the order of the probability distributions is swapped compared to that defined in the paper.
-        if self.alpha == 0: #Forward KL
-            kl_loss = kl_div(all_logps, teacher_all_logps, reduction="none", log_target=True)
-        elif self.alpha == 1: #Reverse KL
-            kl_loss = kl_div(teacher_all_logps, all_logps, reduction="none", log_target=True)
-        else:
-            # Compute the log of the mixture distribution
-            # log(a + b) = log(exp(log(a)) + exp(log(b))) -> for mixture
-            alpha = torch.tensor(self.alpha, dtype=all_logps.dtype)
-            mixture_log_probs = torch.logsumexp(
-                torch.stack([all_logps + torch.log(1 - alpha), teacher_all_logps + torch.log(alpha)]),
-                dim=0,
-            )
-
-            kl_teacher = kl_div(mixture_log_probs, teacher_all_logps, reduction="none", log_target=True)
-            kl_student = kl_div(mixture_log_probs, all_logps, reduction="none", log_target=True)
-
-            # Compute the Generalized Jensen-Shannon Divergence
-            kl_loss = alpha * kl_teacher + (1 - alpha) * kl_student
-        per_token_loss = kl_loss.sum(-1)
+        # Per-token divergence, summed over the vocab. See _jsd_per_token_chunked:
+        # the sum-over-V now happens inside, in slices along T, so the (B, T, V)
+        # temporaries that used to dominate peak memory are never all alive at once.
+        # PyTorch's kl_div argument order differs from the paper's definition;
+        # _jsd_per_token preserves the original call order exactly.
+        per_token_loss = self._jsd_per_token_chunked(all_logps, teacher_all_logps)
 
         if self.use_vllm and self.vllm_importance_sampling_correction and not self.generate_from_teacher:
             ratio = inputs["importance_sampling_ratio"]

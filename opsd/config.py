@@ -717,6 +717,18 @@ class DistilConfig(TrainingArguments):
         },
     )
 
+    jsd_chunk_size: int = field(
+        default=0,
+        metadata={
+            "help": "Evaluate the per-token JSD in slices of this many sequence positions, with "
+            "activation checkpointing per slice (0 = off, single-shot as before). The divergence "
+            "block materializes vocab-sized (B, T, V) fp32 tensors only to reduce over V; at "
+            "V~152k those are ~9 GiB per tensor at T=16384, which OOMs an 80GB H100. Chunking is "
+            "mathematically exact (no top-k truncation) and cuts the peak by roughly T/chunk. "
+            "2048 is a good default for long-completion runs."
+        },
+    )
+
     # Parameters that control wrong-rollout gating (contrastive OPSD)
     gate_mode: str = field(
         default="none",

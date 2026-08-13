@@ -173,6 +173,7 @@ train() {
         --vllm_enable_sleep_mode="${VLLM_SLEEP_MODE:-True}" \
         ${TEACHER_PROMPT_TEMPLATE:+--teacher_prompt_template="${TEACHER_PROMPT_TEMPLATE}"} \
         ${FORCE_THINKING_PREFIX:+--force_thinking_prefix="${FORCE_THINKING_PREFIX}"} \
+        --jsd_chunk_size="${JSD_CHUNK_SIZE:-0}" \
         --gate_mode="${GATE_MODE}" \
         --gate_max_regen_rounds="${GATE_MAX_REGEN_ROUNDS}" \
         --gate_require_diff_answer="${GATE_REQUIRE_DIFF_ANSWER}" \
