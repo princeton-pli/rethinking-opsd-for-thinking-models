@@ -21,8 +21,17 @@ NAME=${1:-}
 DRY_RUN=${DRY_RUN:-0}
 MODELS_DIR=${MODELS_DIR:-/scratch/gpfs/ARORA/skaur/models}
 MODEL=${MODEL:-Qwen3-4B}
-DATA=${DATA:-data/raw/contrastive_arm1_numina.parquet}
+ARM1_DATA=${ARM1_DATA:-data/raw/contrastive_arm1_numina.parquet}
+# The control trains on the same problems but needs the gold_solution column, which
+# only the densegold parquet carries (data_tools/add_gold_solutions.py).
+BASELINE_DATA=${BASELINE_DATA:-${ARM1_DATA/.parquet/_densegold.parquet}}
 MATH_EVALS="aime24_38912 aime25_38912 hmmt25_38912"
+
+case "$NAME" in
+    arm1)     DATA=$ARM1_DATA ;;
+    baseline) DATA=$BASELINE_DATA ;;
+    *) echo "Usage: $0 {arm1|baseline}"; exit 1 ;;
+esac
 
 # Shared with the paper: alpha 0.5 JSD, frozen self-teacher, 1 epoch, effective
 # batch 64 (8 GPUs x micro 1 x accum 8), cosine schedule, bf16, FSDP, seed 42.
