@@ -21,7 +21,9 @@ NAME=${1:-}
 DRY_RUN=${DRY_RUN:-0}
 MODELS_DIR=${MODELS_DIR:-/scratch/gpfs/ARORA/skaur/models}
 MODEL=${MODEL:-Qwen3-4B}
-ARM1_DATA=${ARM1_DATA:-data/raw/contrastive_arm1_numina.parquet}
+# Pooled NuminaMath + DeepMath (see data_tools/pool_arm1_sources.py). Approved
+# 2026-08-15 on the criterion that the two sources' difficulty is indistinguishable.
+ARM1_DATA=${ARM1_DATA:-data/raw/contrastive_arm1_pooled.parquet}
 # The control trains on the same problems but needs the gold_solution column, which
 # only the densegold parquet carries (data_tools/add_gold_solutions.py).
 BASELINE_DATA=${BASELINE_DATA:-${ARM1_DATA/.parquet/_densegold.parquet}}
