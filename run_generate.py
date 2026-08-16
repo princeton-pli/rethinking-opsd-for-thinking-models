@@ -38,6 +38,12 @@ def parse_args():
     parser.add_argument("--num_shards", type=int, default=1)
     parser.add_argument("--shard_id", type=int, default=0)
     parser.add_argument("--merge_only", action="store_true")
+    parser.add_argument("--no_grade", action="store_true",
+                        help="Skip inline correctness grading. math_equal implements its timeout by "
+                             "forking the worker, and forking a process that holds a vLLM CUDA context "
+                             "can deadlock: that stalled shard 0 of job 12413497 for 2h20m and got the "
+                             "whole 8-GPU job killed by della's 90-min idle-GPU watchdog. Generate on "
+                             "GPU with this flag, then grade on CPU via data_tools/grade_jsonl.py.")
     parser.add_argument("--skip_merge", action="store_true",
                         help="Do not let shard 0 wait for all shards and merge.")
     
@@ -235,11 +241,11 @@ def main():
 
                             if handler.grading_mode() == "inline":
                                 gold = handler.get_gold(item["raw_item"])
-                                score_dict = handler.grade(resp_text, gold, item["raw_item"])
-                                standard_fields.update({
-                                    "gold_answer": str(gold), # Stringify for JSON safety
-                                    **score_dict
-                                })
+                                # gold_answer is always written so an offline grader can work
+                                # from the JSONL alone; is_correct only when grading inline.
+                                standard_fields["gold_answer"] = str(gold)  # stringify for JSON safety
+                                if not args.no_grade:
+                                    standard_fields.update(handler.grade(resp_text, gold, item["raw_item"]))
 
                             result_entry = handler.build_result_entry(
                                 item["raw_item"],
