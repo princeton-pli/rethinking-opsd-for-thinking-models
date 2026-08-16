@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import sys
 import collections
 
@@ -20,6 +21,29 @@ from evaluation.utils import extract_answer_math, strip_string
 from evaluation.grader import math_equal
 
 THINK_RE = re.compile(r"<think>[\s\S]*?</think>")
+
+
+def _alarm(signum, frame):
+    raise TimeoutError()
+
+
+def safe_math_equal(a, b, seconds=20):
+    """math_equal with a hard wall-clock ceiling.
+
+    math_equal's own timeout only guards its top-level call; its recursive
+    branches re-enter with timeout=False and run sympy inline and unbounded. A
+    wedge here would hang the pool build inside a GPU allocation, and with the
+    keepalive running nothing would kill it until the walltime.
+    """
+    old = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(seconds)
+    try:
+        return math_equal(a, b, timeout=True)
+    except Exception:
+        return False
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 
 def main():
@@ -59,7 +83,7 @@ def main():
             elif pred and completed:
                 norm = strip_string(str(pred))
                 for rep in wrong_by_answer:
-                    if math_equal(norm, rep, timeout=True):
+                    if safe_math_equal(norm, rep):
                         norm = rep
                         break
                 wrong_by_answer[norm].append((len(visible), visible))

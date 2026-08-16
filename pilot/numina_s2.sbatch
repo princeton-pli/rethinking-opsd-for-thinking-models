@@ -15,8 +15,8 @@
 
 set -uo pipefail
 cd /scratch/gpfs/ARORA/arora/opsd || exit 1
-source slurm/cluster_env.sh
-source envs/train/.venv/bin/activate
+source slurm/cluster_env.sh || { echo "S2 FAILED: cluster_env"; exit 1; }
+source envs/train/.venv/bin/activate || { echo "S2 FAILED: venv"; exit 1; }
 
 SURV=data/raw/numina_survivors.parquet
 OUT=harvest/numina_s2
@@ -32,23 +32,37 @@ die() { echo "S2 FAILED: $1"; echo "$1" > harvest/NUMINA_S2_FAILED; exit 1; }
 # ---- generate (GPU) ----------------------------------------------------------
 if [ ! -f "${RAW}" ]; then
     mkdir -p "${OUT}/$(dirname "${SURV}")"
-    pids=()
     for shard in 0 1 2 3 4 5 6 7; do
-        CUDA_VISIBLE_DEVICES=${shard} python run_generate.py \
-            --model_name "${MODEL}" --dataset "${SURV}" --output_dir "${OUT}" \
-            --batch_size 64 --max_tokens 32768 \
-            --temperature 1.0 --top_p 1.0 --top_k 50 \
-            --num_generation 5 --num_shards 8 --shard_id ${shard} \
-            --no_grade --skip_merge \
-            > "${OUT}/shard_${shard}.log" 2>&1 &
-        pids+=($!)
+        # See numina_s1.sbatch: each shard hands its GPU to a keepalive on exit so
+        # a dead or early shard cannot idle a GPU past the 90-min watchdog.
+        ( CUDA_VISIBLE_DEVICES=${shard} python run_generate.py \
+              --model_name "${MODEL}" --dataset "${SURV}" --output_dir "${OUT}" \
+              --batch_size 64 --max_tokens 32768 \
+              --temperature 1.0 --top_p 1.0 --top_k 50 \
+              --num_generation 5 --num_shards 8 --shard_id ${shard} \
+              --no_grade --skip_merge \
+              > "${OUT}/shard_${shard}.log" 2>&1
+          echo $? > "${OUT}/shard_${shard}.rc"
+          CUDA_VISIBLE_DEVICES=${shard} python pilot/gpu_keepalive.py \
+              >> "${OUT}/shard_${shard}.log" 2>&1 ) &
     done
-    rc=0; for p in "${pids[@]}"; do wait "$p" || rc=1; done
+    while :; do
+        n=$(ls "${OUT}"/shard_*.rc 2>/dev/null | wc -l)
+        [ "$n" -eq 8 ] && break
+        sleep 60
+    done
+    pkill -f gpu_keepalive.py
+    rc=0
+    for shard in 0 1 2 3 4 5 6 7; do
+        [ "$(cat "${OUT}/shard_${shard}.rc")" -eq 0 ] || rc=1
+    done
     [ $rc -eq 0 ] || die generation
     python run_generate.py --model_name "${MODEL}" --dataset "${SURV}" \
         --output_dir "${OUT}" --temperature 1.0 --top_p 1.0 \
         --num_shards 8 --shard_id 0 --merge_only || die merge
     [ -f "${RAW}" ] || die "merge produced no file"
+    NSHARD=$(ls "${RAW}".shard_[0-7] 2>/dev/null | wc -l)
+    [ "${NSHARD}" -eq 8 ] || die "merge saw ${NSHARD}/8 shard files"
 fi
 echo "stage 2 generations: $(wc -l < "${RAW}")"
 
