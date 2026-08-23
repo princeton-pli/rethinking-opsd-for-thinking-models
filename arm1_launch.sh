@@ -39,6 +39,11 @@ esac
 # batch 64 (8 GPUs x micro 1 x accum 8), cosine schedule, bf16, FSDP, seed 42.
 COMMON="MODE=qwen3_opsd,BASE_MODEL=${MODELS_DIR}/${MODEL},TRAIN_PATH=${DATA}"
 COMMON+=",OPSD_ALPHA=0.5,OPSD_LR=5e-6,OPSD_EPOCHS=1"
+# Compute nodes have no interactive login and no outbound access, so the trainer's
+# default report_to=wandb aborts with "api_key not configured (no-tty)" ~2 min in
+# (killed jobs 12610253/12610254). The paper's Countdown runs disable W&B the same
+# way. Metrics still land in the job log via logging_steps=1.
+COMMON+=",WANDB_MODE=disabled,WANDB_DISABLED=true"
 COMMON+=",OPSD_MICRO_BATCH_SIZE=1,OPSD_GRADIENT_ACCUM=8"
 COMMON+=",OPSD_MAX_PROMPT_LENGTH=4096,OPSD_MAX_COMPLETION_LENGTH=16384"
 COMMON+=",LOSS_MAX_COMPLETION_TOKENS=4096,JSD_CHUNK_SIZE=1024"
@@ -78,14 +83,37 @@ if [ "$DRY_RUN" = "1" ]; then
     exit 0
 fi
 
-TRAIN_ID=$(sbatch --parsable --gres=gpu:h100:8 --mem-per-gpu=80G --cpus-per-gpu=12 \
+# --partition is explicit: slurm/train.sh carries NO partition header and relies on
+# SBATCH_PARTITION being exported by slurm/cluster_env.sh in the SUBMITTING shell.
+# This script doesn't source that, so without it the job silently routes to the
+# default `gpu` partition -- which has no h100:8 nodes ("Requested node
+# configuration is not available") and, for a request it can satisfy, queues ~10
+# days. Bit us on 2026-08-24.
+TRAIN_ID=$(sbatch --parsable --partition=pli-c --gres=gpu:h100:8 \
+    --mem-per-gpu=80G --cpus-per-gpu=12 \
     --time=20:00:00 --export="${EXPORTS}" slurm/train.sh)
 echo "   training job: ${TRAIN_ID}"
 
 for eval_name in $MATH_EVALS; do
-    sbatch --dependency=afterok:"${TRAIN_ID}" \
-        --export=ALL,EVAL_SET_NAME=${eval_name},EVAL_MAX_TOKENS=38912,NUM_SHARDS=8,CHECKPOINT_PATH="${CKPT}",TEMP=0.6,N_SAMPLES=16,TOP_P=0.95,EVAL_BATCH_SIZE=8 \
-        slurm/generate_with_retry.sh > /dev/null
+    # Submit the GPU array (slurm/generate.sh) DIRECTLY rather than through
+    # slurm/generate_with_retry.sh. The retry wrapper is a CPU-only orchestrator
+    # that blocks on `sbatch --wait`, so it has nowhere to run here: pli-c rejects
+    # GPU-less jobs ("You are requesting the PLI nodes but not allocating GPUs" --
+    # this silently refused all six eval submissions on 2026-08-19), and the
+    # default cpu partition is ~4000 jobs deep. generate.sh already carries its own
+    # --gres=gpu:1 and --array=0-7. We lose automatic retry of failed shards; the
+    # shards are individually resumable, so a rerun of this script recovers them.
+    # SKIP_EVAL_CHAIN avoids chaining a metrics job onto that same cpu queue --
+    # run_eval.py is a few CPU-minutes and we run it by hand once generations land.
+    sbatch --dependency=afterok:"${TRAIN_ID}" --partition=pli-c --gres=gpu:h100:1 \
+        --export=ALL,EVAL_SET_NAME=${eval_name},EVAL_MAX_TOKENS=38912,NUM_SHARDS=8,CHECKPOINT_PATH="${CKPT}",TEMP=0.6,N_SAMPLES=16,TOP_P=0.95,EVAL_BATCH_SIZE=8,SKIP_EVAL_CHAIN=true,SKIP_GENERATE_MERGE=true \
+        slurm/generate.sh || echo "   WARNING: eval ${eval_name} failed to submit"
 done
+echo "   NOTE: shards run with SKIP_GENERATE_MERGE=true, so nothing merges automatically."
+echo "         Merge on the login node once they finish:  ./merge_evals.sh ${CKPT}"
+echo "         (Without it, array worker 0 becomes a merge supervisor and polls for"
+echo "          its siblings for up to 5.5h holding a GPU at 0% util -- that is what"
+echo "          triggered the cluster's idle-GPU warning on 2026-08-23, job 12828716,"
+echo "          where shard 0 sat for 2h13m waiting on two shards that never appeared.)"
 echo "   evals submitted (dep afterok): ${MATH_EVALS} @ T=0.6, top_p=0.95, n=16, 8 shards"
 unset TEACHER_PROMPT_TEMPLATE
