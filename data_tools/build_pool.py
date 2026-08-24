@@ -21,6 +21,24 @@ from evaluation.utils import extract_answer_math, strip_string
 from evaluation.grader import math_equal
 
 THINK_RE = re.compile(r"<think>[\s\S]*?</think>")
+BOX_RE = re.compile(r"\\boxed\{([^{}]*(?:\{[^{}]*\})*[^{}]*)\}")
+
+
+def internally_consistent(visible):
+    """All boxed values in the exemplar agree (up to string normalization).
+
+    2026-08-24 audit of the trained pool: 13.2% of x- exemplars carried MULTIPLE
+    contradictory boxed values, and 4.6% boxed the GOLD answer in their body
+    before flipping to a wrong final box (grading reads only the last box). A
+    self-contradictory 'wrong' exemplar -- one that derives the right answer and
+    then contradicts itself -- is poison for any teacher asked to judge the
+    pair's relative merits. Require single-valued exemplars; with up to 8
+    rollouts per problem there is usually a clean candidate to swap in.
+    """
+    boxes = {strip_string(b) for b in BOX_RE.findall(visible)}
+    # Exactly one: zero boxes means the exemplar's final answer is not legible
+    # in the visible solution the teacher sees.
+    return len(boxes) == 1
 
 
 def _alarm(signum, frame):
@@ -78,9 +96,12 @@ def main():
             pred = extract_answer_math(resp)
             if r.get("is_correct"):
                 n_correct += 1
-                if completed:
+                if completed and internally_consistent(visible):
                     correct_pool.append((len(visible), visible))
             elif pred and completed:
+                if not internally_consistent(visible):
+                    stats["dropped_inconsistent"] += 1
+                    continue
                 norm = strip_string(str(pred))
                 for rep in wrong_by_answer:
                     if safe_math_equal(norm, rep):

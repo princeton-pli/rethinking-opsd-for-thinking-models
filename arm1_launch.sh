@@ -54,13 +54,19 @@ case "$NAME" in
         # Teacher context is pre-rendered into the teacher_context column by
         # build_contrastive_dataset.py (problem + two UNLABELED student responses,
         # one correct one wrong, order randomized), so the template is a passthrough.
-        EXPORTS="${COMMON},GOLD_ANSWER_KEY=teacher_context,DATASET_NAME=numina_contrastive"
+        # DATASET_NAME feeds the checkpoint path, and slurm/train.sh SKIPS training
+        # outright if that path already exists -- so a rerun on different data must
+        # override it or it silently re-evaluates the old checkpoint.
+        DS=${DATASET_NAME:-numina_contrastive}
+        EXPORTS="${COMMON},GOLD_ANSWER_KEY=teacher_context,DATASET_NAME=${DS}"
         EXPORTS+=",GATE_MODE=wrong_only,GATE_REQUIRE_DIFF_ANSWER=False"
         EXPORTS+=",GATE_GOLD_ANSWER_KEY=answer,GATE_WRONG_ANSWER_KEY=wrong_answer"
         EXPORTS+=",GATE_MAX_REGEN_ROUNDS=3"
         export TEACHER_PROMPT_TEMPLATE='{gold_answer}'
         EXPORTS+=",TEACHER_PROMPT_TEMPLATE"
-        CKPT="checkpoints/opsd__m_${MODEL}__d_numina_contrastive__alpha0.5__bs64__lr5e-6__ep1__gate_wrong_only"
+        # Must track DATASET_NAME exactly as slurm/train.sh builds it, or the evals
+        # would be submitted against a different (possibly stale) checkpoint.
+        CKPT="checkpoints/opsd__m_${MODEL}__d_${DS}__alpha0.5__bs64__lr5e-6__ep1__gate_wrong_only"
         ;;
     baseline)
         # Paper's dense arm on the SAME problems: gold solution in the teacher
