@@ -74,7 +74,7 @@ def main():
             for line in f:
                 try:
                     r = json.loads(line)
-                    done.add((r["question_id"], r["generation_id"]))
+                    done.add((r["question_id"], r["generation_id"], r.get("cell", "")))
                 except Exception:
                     continue
         print(f"resuming: {len(done)} rows already graded")
@@ -86,7 +86,7 @@ def main():
                 r = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if (r["question_id"], r["generation_id"]) in done:
+            if (r["question_id"], r["generation_id"], r.get("cell", "")) in done:
                 continue
             rows.append(r)
     print(f"{len(rows)} rows to grade from {args.inp}")
@@ -99,9 +99,14 @@ def main():
 
     for r in rows:
         assert "gold_answer" in r, f"row {r['question_id']}/{r['generation_id']} has no gold_answer"
-    payloads = [((r["question_id"], r["generation_id"]), r["response"], r["gold_answer"])
-                for r in rows]
-    by_key = {(r["question_id"], r["generation_id"]): r for r in rows}
+    # Key must include the probe's cell field: probe files carry SIX rows per
+    # (question_id, generation_id) -- one per condition -- and the 2026-08-24
+    # probe grading silently collapsed all verdicts onto one cell without it.
+    def key_of(r):
+        return (r["question_id"], r["generation_id"], r.get("cell", ""))
+    payloads = [(key_of(r), r["response"], r["gold_answer"]) for r in rows]
+    by_key = {key_of(r): r for r in rows}
+    assert len(by_key) == len(rows), "non-unique (question_id, generation_id, cell) keys"
 
     # ProcessPoolExecutor, NOT multiprocessing.Pool: Pool workers are DAEMONIC, and
     # a daemonic process cannot spawn children. math_equal implements its timeout by
