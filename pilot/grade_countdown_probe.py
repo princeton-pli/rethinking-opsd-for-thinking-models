@@ -27,6 +27,10 @@ TARGET_RE = re.compile(r"Target:\s*(-?\d+)")
 
 def independent_grade(expr_text, nums, target):
     """Re-derive correctness from scratch: evaluate, compare, check multiset."""
+    # Keep only the expression side of "expr = result" (same fix as
+    # CountdownTask.grade in b0de1b4): the guard below forbids "=", so
+    # "92+5-66=31" would score False regardless of the arithmetic.
+    expr_text = expr_text.split("=")[0]
     e = (expr_text.replace("$", "").replace(" ", "")
          .replace("\\times", "*").replace("\\cdot", "*").replace("\\div", "/")
          .replace("\\left", "").replace("\\right", "")
