@@ -64,10 +64,49 @@ def safe_math_equal(a, b, seconds=20):
         signal.signal(signal.SIGALRM, old)
 
 
+def relabel_with_llm(by_q, stats):
+    """Re-judge every is_correct=False rollout by LLM answer-equivalence.
+
+    math_equal mislabels ~10% of "wrong" answers as wrong when they are merely
+    written differently (measured 2026-08-26). Those become negative exemplars,
+    i.e. the teacher is shown a CORRECT solution labelled incorrect -- supervision
+    that is actively anti-correlated with truth. Cheap to fix: batched flash-tier
+    equivalence over answer STRINGS only (~$0.02 per 1000 pairs).
+    """
+    from evaluation.llm_equal import LLMEqual
+
+    judge = LLMEqual()
+    pairs, refs = [], []
+    for qid, gens in by_q.items():
+        for r in gens:
+            if r.get("is_correct"):
+                continue
+            pred = extract_answer_math(r["response"])
+            if not pred:
+                continue
+            pairs.append((str(r.get("gold_answer", "")), str(pred)))
+            refs.append(r)
+    if not pairs:
+        return
+    print(f"LLM re-judging {len(pairs)} rollouts graded wrong ...")
+    verdicts = judge.batch_equal(pairs)
+    flipped = 0
+    for r, same in zip(refs, verdicts):
+        if same:
+            r["is_correct"] = True          # false negative: it was right all along
+            r["relabelled"] = True
+            flipped += 1
+    stats["relabelled_to_correct"] = flipped
+    print(f"  flipped {flipped}/{len(pairs)} ({100*flipped/len(pairs):.1f}%) to correct "
+          f"| judge stats: {judge.stats}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("jsonls", nargs="+")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--no_llm_relabel", action="store_true",
+                    help="skip LLM answer-equivalence relabelling (offline/debug)")
     args = ap.parse_args()
 
     by_q = collections.defaultdict(list)
@@ -85,6 +124,8 @@ def main():
         print(f"{path}: {n} generations")
 
     pool, stats = [], collections.Counter()
+    if not args.no_llm_relabel:
+        relabel_with_llm(by_q, stats)
     for qid, gens in sorted(by_q.items()):
         correct_pool = []
         wrong_by_answer = collections.defaultdict(list)

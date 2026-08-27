@@ -176,7 +176,17 @@ class CountdownTask(BaseTask):
         if boxed:
             expression = boxed
         else:
-            expression = clean_resp.split("=")[0].strip()
+            expression = clean_resp
+
+        # Keep only the expression side of "expr = result". The non-boxed branch
+        # always did this; the boxed branch did not, so a response boxing
+        # "92+5-66=31" failed the character-class guard below (which forbids "=")
+        # and scored 0 regardless of the arithmetic -- while the identical
+        # solution boxed as "92-66+5" scored 1. Measured 2026-08-27 on 600
+        # ungated Qwen3-4B rollouts: 16.5% box the "expr = result" form, giving a
+        # 14.5% false-negative rate over all rollouts (64.4% among graded-wrong),
+        # and understating true accuracy by ~15 points (77.5% -> 92.0%).
+        expression = expression.split("=")[0].strip()
 
         while r'\frac' in expression or r'\dfrac' in expression or r'\tfrac' in expression:
             new_expr = self._FRAC_RE.sub(r'((\1)/(\2))', expression)

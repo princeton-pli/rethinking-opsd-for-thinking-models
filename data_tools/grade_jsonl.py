@@ -40,7 +40,7 @@ def _grade_one(payload):
     crashes into False, which is how a total grading failure could have shipped
     looking like a plausible set of wrong answers.
     """
-    key, response, gold = payload
+    key, response, gold, item = payload
 
     def _alarm(signum, frame):
         raise TimeoutError()
@@ -50,7 +50,7 @@ def _grade_one(payload):
     old = signal.signal(signal.SIGALRM, _alarm)
     signal.alarm(20)
     try:
-        return key, bool(_HANDLER.grade(response, gold, {})["is_correct"])
+        return key, bool(_HANDLER.grade(response, gold, item)["is_correct"])
     except TimeoutError:
         return key, "timeout"
     except Exception:
@@ -104,7 +104,11 @@ def main():
     # probe grading silently collapsed all verdicts onto one cell without it.
     def key_of(r):
         return (r["question_id"], r["generation_id"], r.get("cell", ""))
-    payloads = [(key_of(r), r["response"], r["gold_answer"]) for r in rows]
+    # Pass the WHOLE row as `item`, not {}. MathTask ignores it, but CountdownTask
+    # reads datapoint_x/datapoint_nums from it to check the used numbers against the
+    # allowed multiset, and HMMTTask reads item["answer"] for multi-value matching --
+    # with {} both silently score every rollout wrong.
+    payloads = [(key_of(r), r["response"], r["gold_answer"], r) for r in rows]
     by_key = {key_of(r): r for r in rows}
     assert len(by_key) == len(rows), "non-unique (question_id, generation_id, cell) keys"
 
