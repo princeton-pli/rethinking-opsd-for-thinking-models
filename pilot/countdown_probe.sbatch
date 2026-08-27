@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=80G
-#SBATCH --time=6:00:00
+#SBATCH --time=10:00:00
 #SBATCH --output=/scratch/gpfs/ARORA/arora/opsd/pilot/slurm-%j.out
 #
 # Does the verification-generation gap exist for Countdown?
@@ -29,8 +29,8 @@ source envs/train/.venv/bin/activate || exit 1
 CD=/scratch/gpfs/ARORA/arora/data/raw/countdown_15k.parquet
 [ -f "$CD" ] || { echo "countdown parquet missing"; exit 1; }
 
-python pilot/countdown_pairs.py --countdown "$CD" --n_problems 600 \
-    --out pilot/countdown_pairs.jsonl || exit 1
-python pilot/probe_adjudication.py --parquet pilot/countdown_pairs.parquet \
-    --n_problems 300 --out pilot/probe_countdown.jsonl || exit 1
+python pilot/countdown_pairs.py --countdown "$CD" --n_problems 2000 \
+    --out pilot/countdown_pairs_v2.jsonl || exit 1
+python pilot/probe_adjudication.py --parquet pilot/countdown_pairs_v2.parquet \
+    --n_problems 300 --out pilot/probe_countdown_v2.jsonl || exit 1
 echo "COUNTDOWN PROBE DONE"
