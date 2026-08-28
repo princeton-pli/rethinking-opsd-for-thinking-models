@@ -29,8 +29,12 @@ source envs/train/.venv/bin/activate || exit 1
 CD=/scratch/gpfs/ARORA/arora/data/raw/countdown_15k.parquet
 [ -f "$CD" ] || { echo "countdown parquet missing"; exit 1; }
 
-python pilot/countdown_pairs.py --countdown "$CD" --n_problems 2000 \
-    --out pilot/countdown_pairs_v2.jsonl || exit 1
+# Stage 1 is idempotent: the 2026-08-27 harvest (job 13066346) completed and
+# wrote the parquet before the probe stage crashed on n_problems > population.
+if [ ! -f pilot/countdown_pairs_v2.parquet ]; then
+    python pilot/countdown_pairs.py --countdown "$CD" --n_problems 2000 \
+        --out pilot/countdown_pairs_v2.jsonl || exit 1
+fi
 python pilot/probe_adjudication.py --parquet pilot/countdown_pairs_v2.parquet \
     --n_problems 300 --out pilot/probe_countdown_v2.jsonl || exit 1
 echo "COUNTDOWN PROBE DONE"

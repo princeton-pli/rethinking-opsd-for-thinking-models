@@ -50,7 +50,15 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    d = pd.read_parquet(args.parquet).sample(n=args.n_problems, random_state=args.seed)
+    d = pd.read_parquet(args.parquet)
+    if len(d) == 0:
+        raise SystemExit(f"no pairs in {args.parquet}; nothing to probe")
+    # Honest-grader harvests can yield fewer usable pairs than requested
+    # (countdown v2: 158 of 2000) — probe whatever exists rather than crash.
+    n = min(args.n_problems, len(d))
+    if n < args.n_problems:
+        print(f"only {len(d)} pairs available (< {args.n_problems}); probing all of them")
+    d = d.sample(n=n, random_state=args.seed)
     tok = AutoTokenizer.from_pretrained(args.model)
 
     prompts, meta = [], []

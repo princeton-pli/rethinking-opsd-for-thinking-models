@@ -50,8 +50,10 @@ def independent_grade(expr_text, nums, target):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--probe", default="pilot/probe_countdown.jsonl")
-    ap.add_argument("--pairs", default="pilot/countdown_pairs.parquet")
+    # v2 defaults: the v1 files were harvested through the pre-b0de1b4 grader
+    # (~92% of x- actually correct) and every number derived from them is void.
+    ap.add_argument("--probe", default="pilot/probe_countdown_v2.jsonl")
+    ap.add_argument("--pairs", default="pilot/countdown_pairs_v2.parquet")
     args = ap.parse_args()
 
     pairs = pd.read_parquet(args.pairs).set_index("question_id")
