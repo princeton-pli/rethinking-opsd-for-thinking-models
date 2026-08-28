@@ -31,10 +31,26 @@ up in the conditionals.
 * 3–4 number Countdown cannot supply training data: 75.2% of problems solved
   8/8, usable-pair rate 7.9% (158/2000). Hence the hard generator.
 
-## 3. Hard-Countdown generator (`pilot/gen_hard_countdown.py`)
+## 3. Hard-Countdown generator
 
-Solvable by construction; **harden the task, don't filter it** (filtering
-conditions on model failure → biased sub-distribution).
+**Amended 2026-08-27 late:** the primary generator is now the group's own
+pattern-balanced construction from Park/Kaur/Arora, arXiv 2512.01775
+(`princeton-pli/RL-skill-comp`) — Sanjeev pointed out the paper has n=5,6
+results. Their protocol picks a canonical expression pattern first, then
+samples numbers uniformly from [1,99] until the pattern evaluates to an
+integer target in [1,99]; balancing per pattern eliminates the structural
+and selection biases they measured (each ×/÷ ~10× under-represented under
+naive filtering — the same skew our CR caught as 72% signed-sum witnesses).
+Non-integer intermediates are allowed. n=5 has 558 canonical patterns, n=6
+has 4,328. The wrapper `pilot/gen_countdown_balanced.py` emits the opsd
+parquet schema; the signed-sum filter is retired for this set (balance does
+the job properly). The §3-original tree generator and its integer-
+intermediate slice remain as a secondary difficulty datapoint (gate job
+13077201).
+
+Original design (kept for the record): solvable by construction; **harden
+the task, don't filter it** (filtering conditions on model failure → biased
+sub-distribution).
 
 * Sample n ∈ {5, 6} numbers uniformly from [1, 99] (with replacement across
   draws, multiset within an instance allowed — matches source data marginals).
@@ -75,13 +91,25 @@ Proceed to RL only if:
 * **adjudication when copying ≥ 65% nothink** on hard pairs (the gap must
   survive hardening; if verification collapses along with generation, the
   (model, task) pair is wrong and we stop here — that is the probe doing its
-  job, ~1 GPU-hour instead of a failed training run).
+  job, ~1 GPU-hour instead of a failed training run). This is a conditional
+  metric: the copy RATE is reported alongside it, and if hardening drops the
+  copy rate substantially the cell sizes shrink and the number changes
+  meaning — flag rather than compare across regimes silently. Copy detection
+  is value+multiset equivalence, not exact string match (spec-review L3).
+  The x⁻ pure-signed-sum fraction is reported for the filtered slice set
+  (spec-review M2).
 
 ## 5. RL design
 
-* **Trainer**: verl in `della-post-training` (cross-repo). opsd exports a
+* **Trainer**: verl (cross-repo). Preferred recipe: `princeton-pli/
+  RL-skill-comp`'s own verl setup (pinned commit 083da9ab, env spec in its
+  README, working Countdown GRPO scripts) — the group already runs Countdown
+  RL with it; `della-post-training`'s verl is the fallback. opsd exports a
   self-contained parquet of episodes; a thin config + reward file lives with
-  the trainer. verl is NOT vendored into opsd.
+  the trainer. verl is NOT vendored into opsd. The reward file VENDORS the
+  exact fixed grader (post-b0de1b4 strip-at-`=` + exactly-once multiset)
+  with its 6 regression cases as tests in the trainer repo — no
+  reimplementation (spec-review M1; the auditor-shared-blind-spot lesson).
 * **Model**: Qwen3-4B, **LoRA** (r=32, α=64, all linear) — teacher-with/
   without-adapter becomes a free ablation and the frozen base is always
   available as reference. Full-FT only if LoRA shows signal but saturates.
@@ -91,15 +119,31 @@ Proceed to RL only if:
   first 4,096 of ~10,900 tokens ≈ 38%). Prefixes come from BOTH right and
   wrong rollouts of the SAME problem — steering away from a bad prefix and
   staying on a good one are both in-distribution.
+* **Disjointness (spec-review H1)**: the pair rollouts and the prefix
+  rollout MUST be distinct draws from the problem's k=8 — otherwise the
+  prefix is a truncation of x⁺/x⁻ and "locate my prefix in the pair, copy
+  the remainder" earns full reward with zero reasoning. The episode
+  exporter asserts disjointness; problems without ≥3 distinct usable
+  rollouts are dropped (count logged, no silent cap).
 * **Reward**: outcome-only. Last `\boxed{}` graded by the deterministic
   checker (eval + exactly-once multiset). The trace is never graded.
-* **Known blind spot, measured not rewarded**: ignore-the-prefix-and-resolve
-  earns full reward while teaching nothing about steering. Measurement, per
-  eval batch: (a) fraction of completions whose expression reuses an
-  intermediate value computed in the prefix; (b) completion-length vs
-  from-scratch-length distribution; (c) 50-sample LLM-judge spot check
-  (g-flash, local, cached). If restart dominates, that is a finding about the
-  reward, reported not patched silently.
+* **Known blind spots, measured not rewarded**: ignore-the-prefix-and-resolve
+  AND copy-from-pair both earn full reward while teaching nothing about
+  steering. Measurement, per eval batch: (a) fraction of completions whose
+  expression reuses an intermediate value computed in the prefix; (b)
+  completion-length vs from-scratch-length distribution; (c) 50-sample
+  LLM-judge spot check (g-flash, local, cached); (d) fraction of final
+  expressions matching x⁺'s or x⁻'s expression (normalized: strip
+  spaces/parens-insensitive eval-equivalence on the value AND multiset,
+  plus sorted-operand string form to catch commutative rewrites).
+* **Pre-registered interpretation (spec-review H3), decided BEFORE the run**:
+  the primary success metric is the forward-pass logprob margin (§6), not
+  generative behavior. If copy-from-pair dominates generation but the margin
+  improves on held-out pairs, the run is a SUCCESS for OPSD purposes (the
+  scoring conditionals moved) with a noted generative degeneracy. If the
+  margin does not improve, the run is a FAILURE regardless of probe/reward
+  curves. Restart-dominance with improved margin = success with the §5
+  steering caveat reported.
 * **KL budget**: KL(trainee ‖ frozen base) measured on the generative
   distribution over held-out OPSD-style rollouts (the distribution OPSD will
   score), logged every eval; hard-stop threshold set after step-0 calibration.
@@ -109,13 +153,46 @@ Proceed to RL only if:
 
 ## 6. Evaluation (two-sided from the start)
 
+* **PRIMARY (spec-review H2) — forward-pass logprob margin**: mean per-token
+  logprob margin of x⁺ vs x⁻ under the teacher WITH pair context, on
+  held-out pairs, before/after RL, forward passes only. This is exactly the
+  quantity the OPSD distillation gradient consumes; every other metric below
+  is secondary/diagnostic. Also computed pair-ablated (no pair in context)
+  to attribute any gain to the pair rather than generic competence
+  (spec-review M3).
 * **Grader side**: 3×2 adjudication probe cells before/after; completion
-  accuracy from held-out prefixes (right-prefix and wrong-prefix separately).
+  accuracy from held-out prefixes (right-prefix and wrong-prefix separately);
+  a two-wrongs eval cell (both candidates wrong) to separate adjudication
+  from answer-copying; eval probe salted with signed-sum-solvable instances
+  so operator-presence tells don't inflate the number (spec-review M2).
 * **Generative side**: AIME24/25 + HMMT25 avg@16 at 4k–38,912 budgets +
   response length + fork rate — the Arm-1 harness unchanged.
 * **End-to-end (separate follow-up run, own approval)**: plug the RL'd
   teacher into contrastive OPSD on hard Countdown; success = beats both the
-  frozen-teacher contrastive arm and the dense-gold control.
+  frozen-teacher contrastive arm and the dense-gold control. Everything in
+  that run — student rollouts, eval — must be regenerated under the new
+  "exactly once" prompt; mixing old at-most-once-prompt artifacts puts the
+  RL'd teacher off-distribution (spec-review M5a).
+
+Power notes (spec-review M4): the neglabel-backfire claim rests on the think
+cell; the nothink cell (28.6 vs 24.1 on 158 pairs, ~1σ) is not evidence and
+is not carried forward. AIME/HMMT "no generative damage" claims use the
+pooled 3-set average with a paired-by-problem bootstrap; per-set SE at
+avg@16 is ~2–3 pts, so control-size effects (~5 pts) are only detectable
+pooled. Post-RL probe comparisons state n per cell; sub-8-pt differences on
+<300 clean pairs are treated as noise.
+
+Known limitations, named not fixed (spec-review M5b, L1, L4): RL prefixes
+are a frozen harvest, on-distribution only for the initial student — nothing
+watches prefix staleness as the eventual OPSD student drifts. GRPO
+right-prefix groups will often be all-correct → zero advantage → the
+effective diet is wrong-prefix-dominated; per-episode-type solve rate and
+advantage mass are logged. The RL training set is necessarily the
+model-fallible subset (needs ≥1 right and ≥1 wrong rollout at k=8), in
+tension with "harden, don't filter"; the gate's usable-rate measures how
+severe that conditioning is. KL stop rule: threshold = eval-noise floor
+measured across decoding seeds at step 0 (LoRA starts at identity, so
+step-0 KL is trivially 0 and is NOT the baseline; spec-review L2).
 
 ## 7. Budget
 
