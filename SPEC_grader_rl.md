@@ -44,6 +44,10 @@ conditions on model failure → biased sub-distribution).
   (= target) in [10, 100] (source data: targets 10–100, numbers 1–99).
 * Reject degenerate constructions: any intermediate identical to a leaf it
   combines with via ×1, ÷1, or a−b=0 shortcut (they reduce effective n).
+* Reject instances solvable by any ± combination of the numbers (≤64 evals;
+  CR 2026-08-27 measured 72% of unfiltered witnesses were pure signed sums —
+  a ≤32-combo search that would recreate the too-easy regime). Escape hatch:
+  `--allow_signed_sum` if the gate shows the filtered set is too hard.
 * Dedup on (sorted number multiset, target). Store the witness expression in
   the parquet for auditability; the witness NEVER enters any prompt.
 * Prompt template: same as source data but "each number **exactly once**" —

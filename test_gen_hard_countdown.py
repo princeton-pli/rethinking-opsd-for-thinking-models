@@ -8,7 +8,8 @@
 import re
 import sys
 
-from pilot.gen_hard_countdown import build_rows, gen_instance, PROMPT_TEMPLATE
+from pilot.gen_hard_countdown import (build_rows, gen_instance,
+                                      signed_sum_solvable, PROMPT_TEMPLATE)
 from pilot.grade_countdown_probe import NUMS_RE, TARGET_RE
 from evaluation.tasks import CountdownTask
 
@@ -69,6 +70,33 @@ def main():
         vals_ok.append(re.fullmatch(r"[\d+\-*/()]+", e) is not None
                        and eval(e) == r["datapoint_y"])
     check("witness is plain arithmetic and evals to target", all(vals_ok))
+
+    check("no instance is signed-sum solvable (default filter)",
+          not any(signed_sum_solvable(r["datapoint_nums"], r["datapoint_y"])
+                  for r in rows))
+
+    # Parquet round-trip through the exact seam the GPU harvest uses:
+    # list column -> ndarray -> row_to_item -> format_prompt/get_gold/grade
+    # (the landmine documented in countdown_pairs.py's row_to_item docstring).
+    import tempfile
+    import pandas as pd
+    from pilot.countdown_pairs import row_to_item
+    with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+        pd.DataFrame(rows[:50]).to_parquet(tmp.name, index=False)
+        back = pd.read_parquet(tmp.name)
+    rt_ok = []
+    for _, row in back.iterrows():
+        item = row_to_item(row)
+        msgs = task.format_prompt(item)
+        gold = task.get_gold(item)
+        rt_ok.append(
+            isinstance(msgs, list)
+            and msgs[0]["content"] == item["datapoint_input_text"]
+            and gold == item["datapoint_y"]
+            and task.grade("\\boxed{" + item["witness_expr"] + "}",
+                           gold, item)["is_correct"])
+    check("parquet round-trip: format_prompt/get_gold/grade all consistent",
+          all(rt_ok))
 
     if failures:
         print(f"\n{len(failures)} FAILURES: {failures}")

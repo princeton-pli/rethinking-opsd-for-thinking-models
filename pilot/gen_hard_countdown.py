@@ -17,6 +17,8 @@
 # most once" -- CountdownTask.grade has always demanded the full multiset, and
 # the mismatch made 7.7% of harvested x- mere subset solutions.
 import argparse
+import itertools
+import os
 import random
 import sys
 
@@ -66,8 +68,21 @@ def _combine(rng, pool):
     return True
 
 
+def signed_sum_solvable(nums, target):
+    """True if some +/- assignment over ALL numbers hits the target.
+
+    CR finding 2026-08-27: without this filter, 72% of accepted witnesses are
+    pure signed sums -- a 2^(n-1)-combination search, much easier than general
+    expression search, risking a rerun of the 3-4 number too-easy regime.
+    """
+    for signs in itertools.product((1, -1), repeat=len(nums) - 1):
+        if nums[0] + sum(s * v for s, v in zip(signs, nums[1:])) == target:
+            return True
+    return False
+
+
 def gen_instance(rng, n, num_lo=1, num_hi=99, target_lo=10, target_hi=100,
-                 max_tries=200):
+                 max_tries=200, reject_signed_sum=True):
     """One solvable instance: dict(nums, target, witness) or None."""
     for _ in range(max_tries):
         nums = [rng.randint(num_lo, num_hi) for _ in range(n)]
@@ -80,12 +95,15 @@ def gen_instance(rng, n, num_lo=1, num_hi=99, target_lo=10, target_hi=100,
         if not ok:
             continue
         target, witness = pool[0]
-        if target_lo <= target <= target_hi:
-            return {"nums": nums, "target": target, "witness": witness}
+        if not (target_lo <= target <= target_hi):
+            continue
+        if reject_signed_sum and signed_sum_solvable(nums, target):
+            continue
+        return {"nums": nums, "target": target, "witness": witness}
     return None
 
 
-def build_rows(seed, n_instances, mix):
+def build_rows(seed, n_instances, mix, reject_signed_sum=True):
     """Deduped rows in the countdown_15k normalized schema (+ witness)."""
     rng = random.Random(seed)
     sizes = [n for n, _ in mix]
@@ -98,7 +116,7 @@ def build_rows(seed, n_instances, mix):
                 f"only {len(rows)}/{n_instances} after {attempts} attempts; "
                 "constraints too tight")
         n = rng.choices(sizes, weights=weights)[0]
-        inst = gen_instance(rng, n)
+        inst = gen_instance(rng, n, reject_signed_sum=reject_signed_sum)
         if inst is None:
             continue
         key = (tuple(sorted(inst["nums"])), inst["target"])
@@ -127,13 +145,18 @@ def main():
                     help="comma list of n:weight")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="data/raw/countdown_hard_3k.parquet")
+    ap.add_argument("--allow_signed_sum", action="store_true",
+                    help="keep instances solvable by a +/- combination "
+                         "(default: rejected as too easy)")
     args = ap.parse_args()
 
     mix = [(int(p.split(":")[0]), float(p.split(":")[1]))
            for p in args.mix.split(",")]
-    rows = build_rows(args.seed, args.n_instances, mix)
+    rows = build_rows(args.seed, args.n_instances, mix,
+                      reject_signed_sum=not args.allow_signed_sum)
 
     import pandas as pd
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     df = pd.DataFrame(rows)
     df.to_parquet(args.out, index=False)
     counts = df["input_count"].value_counts().sort_index()
