@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -56,18 +57,33 @@ def load_patterns(annotated_path, size):
 
 def sample_for_pattern(rng, pattern, size, per_pattern, seen_keys,
                        max_tries=200_000):
-    """Up to per_pattern instances of one pattern (paper's inner loop)."""
+    """Up to per_pattern instances of one pattern (paper's inner loop).
+
+    One value is drawn per DISTINCT letter, and the instance's number list is
+    read back off the instantiated witness's leaf occurrences: 812 of the
+    4,328 n=6 canonical patterns repeat a letter (e.g. "...*E-D" with D twice
+    and no F), so independent per-position draws would fail the exactly-once
+    multiset essentially always and silently exclude the whole
+    duplicated-number structural class (CR finding, 2026-08-27 late).
+    """
+    letters = sorted(set(re.findall(r"[A-F]", pattern)))
     out, tries = [], 0
     while len(out) < per_pattern and tries < max_tries:
         tries += 1
-        nums = [rng.randint(1, 99) for _ in range(size)]
-        expr = plug_in_nums(pattern, nums)
+        values = [rng.randint(1, 99) for _ in letters]
+        expr = pattern
+        for letter, value in zip(letters, values):
+            expr = expr.replace(letter, str(value))
         try:
             result = eval(expr)
         except Exception:        # division by zero
             continue
         if not (is_integer(result) and 1 <= result < 100):
             continue
+        nums = [int(x) for x in re.findall(r"\d+", expr)]
+        if len(nums) != size:    # every k-size shape has exactly k leaves
+            raise RuntimeError(f"pattern {pattern!r} has {len(nums)} leaves, "
+                               f"expected {size}")
         key = (tuple(sorted(nums)), int(result))
         if key in seen_keys:     # global dedup: one row per (multiset, target)
             continue
@@ -84,7 +100,7 @@ def build_rows(annotated_path, seed, plan, grade_check=None):
     unsatisfiable-in-budget (~11% of patterns at 50k tries, mostly
     division-heavy n=6 ones) so its slot redistributes to the others."""
     rng = random.Random(seed)
-    rows, seen_keys, dropped = [], set(), 0
+    rows, seen_keys, dropped, grade_dropped = [], set(), 0, 0
     for size, n_instances in plan:
         patterns = load_patterns(annotated_path, size)
         rng.shuffle(patterns)
@@ -116,7 +132,11 @@ def build_rows(annotated_path, seed, plan, grade_check=None):
                     "canonical_pattern": inst["pattern"],
                 }
                 if grade_check is not None and not grade_check(row):
-                    continue          # pattern stays live, slot not counted
+                    # Pattern is DROPPED (not kept live): a pattern whose
+                    # instances keep failing the grader would otherwise stall
+                    # the pass loop forever. Counted so exclusions are visible.
+                    grade_dropped += 1
+                    continue
                 rows.append(row)
                 got += 1
                 next_active.append(pattern)
@@ -127,6 +147,9 @@ def build_rows(annotated_path, seed, plan, grade_check=None):
             print(f"  WARNING: patterns exhausted at {got}")
     if dropped:
         print(f"dropped {dropped} pattern-passes as unsatisfiable in budget")
+    if grade_dropped:
+        print(f"DROPPED {grade_dropped} patterns on witness grade failure -- "
+              f"investigate, this should be ~0 after the distinct-letter fix")
     return rows
 
 
