@@ -176,7 +176,10 @@ class CountdownTask(BaseTask):
         if boxed:
             expression = boxed
         else:
-            expression = clean_resp.split("=")[0].strip()
+            expression = clean_resp
+
+        # Accept final answers written as "expr = result".
+        expression = expression.split("=")[0].strip()
 
         while r'\frac' in expression or r'\dfrac' in expression or r'\tfrac' in expression:
             new_expr = self._FRAC_RE.sub(r'((\1)/(\2))', expression)
