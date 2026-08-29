@@ -39,7 +39,7 @@ python3 -m verl.trainer.main_ppo \
     data.prompt_key=prompt \
     data.custom_cls.path=/scratch/gpfs/ARORA/arora/opsd/rl/prefix_dataset.py \
     data.custom_cls.name=PrefixContinuationDataset \
-    "+data.apply_chat_template_kwargs.chat_template=$TPL" \
+    "+data.apply_chat_template_kwargs.chat_template=\"$TPL\"" \
     data.train_batch_size=64 \
     data.max_prompt_length=12288 \
     data.max_response_length=8192 \
@@ -74,7 +74,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger=['console'] \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
-    trainer.save_freq=25 \
+    trainer.save_freq=10 \
     trainer.test_freq=25 \
     trainer.total_epochs=1 \
     trainer.default_local_dir="$OUT" \
