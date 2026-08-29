@@ -165,6 +165,14 @@ Proceed to RL only if:
   a two-wrongs eval cell (both candidates wrong) to separate adjudication
   from answer-copying; eval probe salted with signed-sum-solvable instances
   so operator-presence tells don't inflate the number (spec-review M2).
+* **Pre-registered secondary (Sanjeev's hypothesis, 2026-08-29): does
+  grading ability transfer to solving?** Measured by the probe's none/*
+  cells (bare problem, no pair) before vs after grader-RL: baseline 0.033
+  nothink / 0.422 think on 300 held-out balanced problems. A gain there is
+  automatic verify→solve transfer. If flat, the follow-up arm is a MIXED
+  diet (grading-completion episodes + bare-solve episodes, same recipe) to
+  test whether transfer emerges from combining the task types — staged,
+  not launched, own approval.
 * **Generative side**: AIME24/25 + HMMT25 avg@16 at 4k–38,912 budgets +
   response length + fork rate — the Arm-1 harness unchanged.
 * **End-to-end (separate follow-up run, own approval)**: plug the RL'd
