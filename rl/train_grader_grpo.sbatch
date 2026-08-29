@@ -28,6 +28,10 @@ EPISODES=${EPISODES:-rl/episodes_balanced}
 python rl/reward_countdown.py || { echo "reward regression cases FAILED"; exit 1; }
 
 export WANDB_MODE="offline"
+# openai_harmony (pulled in by this venv's verl) downloads tiktoken vocabs at
+# init; compute nodes have no internet. Same fix as della-post-training's
+# slurm_rlvr.sh: point it at the pre-downloaded cache.
+export TIKTOKEN_ENCODINGS_BASE=/scratch/gpfs/ARORA/arora/della-post-training/envs/harmony_encodings
 MODEL=/scratch/gpfs/ARORA/skaur/models/Qwen3-4B
 OUT=${OUT:-/scratch/gpfs/ARORA/arora/opsd/rl/checkpoints/grader_grpo_lora_v1}
 TPL="{% for m in messages %}{{ m['content'] }}{% endfor %}"
