@@ -48,6 +48,10 @@ def main():
     ap.add_argument("--n_samples", type=int, default=2)
     ap.add_argument("--out", default="pilot/probe_adjudication.jsonl")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--adapter", default=None,
+                    help="peft LoRA adapter dir; applied via vLLM enable_lora "
+                         "(a bf16-merged model would bury a small adapter "
+                         "below quantization noise)")
     args = ap.parse_args()
 
     d = pd.read_parquet(args.parquet)
@@ -81,7 +85,13 @@ def main():
                              "gold_answer": str(r["answer"]), "source": r.get("source", "?"),
                              "answer_len": len(str(r["answer"]))})
 
-    llm = LLM(model=args.model, dtype="bfloat16", gpu_memory_utilization=0.9)
+    lora_kwargs, lora_request = {}, None
+    if args.adapter:
+        from vllm.lora.request import LoRARequest
+        lora_kwargs = {"enable_lora": True, "max_lora_rank": 32}
+        lora_request = LoRARequest("adapter", 1, args.adapter)
+    llm = LLM(model=args.model, dtype="bfloat16", gpu_memory_utilization=0.9,
+              **lora_kwargs)
     # Thinking-off responses are short; thinking-on needs full deliberation room.
     sp_think = SamplingParams(n=args.n_samples, temperature=0.6, top_p=0.95, max_tokens=16384)
     sp_nothink = SamplingParams(n=args.n_samples, temperature=0.6, top_p=0.95, max_tokens=2048)
@@ -91,7 +101,8 @@ def main():
 
     results = [None] * len(prompts)
     for idxs, sp in ((idx_nothink, sp_nothink), (idx_think, sp_think)):
-        outs = llm.generate([prompts[i][0] for i in idxs], sp, use_tqdm=True)
+        outs = llm.generate([prompts[i][0] for i in idxs], sp, use_tqdm=True,
+                            lora_request=lora_request)
         for i, out in zip(idxs, outs):
             results[i] = [o.text for o in out.outputs]
 

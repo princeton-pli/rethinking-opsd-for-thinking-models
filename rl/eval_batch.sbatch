@@ -38,7 +38,7 @@ python rl/eval_logprob_margin.py \
 
 python pilot/probe_adjudication.py \
     --parquet pilot/countdown_pairs_balanced.parquet \
-    --model "$CKPT/eval_merged" \
+    --adapter "$CKPT/eval_adapter" \
     --n_problems 300 \
     --out pilot/probe_countdown_balanced_post.jsonl || exit 1
 
