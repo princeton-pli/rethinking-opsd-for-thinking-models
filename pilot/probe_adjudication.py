@@ -52,6 +52,10 @@ def main():
                     help="peft LoRA adapter dir; applied via vLLM enable_lora "
                          "(a bf16-merged model would bury a small adapter "
                          "below quantization noise)")
+    ap.add_argument("--template", default="v1", choices=["v1", "v2"],
+                    help="v2 = Sanjeev's 2026-08-30 restructured phrasing "
+                         "(rl/templates.py); v2 runs none+unlabeled cells "
+                         "only (neglabel is a dead design)")
     args = ap.parse_args()
 
     d = pd.read_parquet(args.parquet)
@@ -69,12 +73,23 @@ def main():
     for qid, r in d.iterrows():
         # Reconstruct the exemplar order the Arm-1 context used (pos_first).
         a, b = (r["x_plus"], r["x_minus"]) if r["pos_first"] else (r["x_minus"], r["x_plus"])
-        contexts = {
-            "none": r["problem"],
-            "unlabeled": r["problem"] + "\n\n" + UNLABELED_TAIL.format(a=a, b=b),
-            "neglabel": r["problem"] + "\n\n" + NEGLABEL_TAIL.format(
-                a=a, b=b, wrong="\\boxed{" + str(r["wrong_answer"]) + "}"),
-        }
+        if args.template == "v2":
+            from rl.templates import v2_pair_content, v2_bare_content
+            from pilot.grade_countdown_probe import NUMS_RE, TARGET_RE
+            nums = [int(x) for x in
+                    NUMS_RE.search(r["problem"]).group(1).split(",")]
+            target = int(TARGET_RE.search(r["problem"]).group(1))
+            contexts = {
+                "none": v2_bare_content(nums, target),
+                "unlabeled": v2_pair_content(nums, target, a, b),
+            }
+        else:
+            contexts = {
+                "none": r["problem"],
+                "unlabeled": r["problem"] + "\n\n" + UNLABELED_TAIL.format(a=a, b=b),
+                "neglabel": r["problem"] + "\n\n" + NEGLABEL_TAIL.format(
+                    a=a, b=b, wrong="\\boxed{" + str(r["wrong_answer"]) + "}"),
+            }
         for ctx_name, content in contexts.items():
             for think in (False, True):
                 text = tok.apply_chat_template(
