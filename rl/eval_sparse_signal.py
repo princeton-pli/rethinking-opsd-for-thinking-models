@@ -71,7 +71,9 @@ def main():
     ap.add_argument("--model", default="/scratch/gpfs/ARORA/skaur/models/Qwen3-4B")
     ap.add_argument("--n_slot", type=int, default=922)
     ap.add_argument("--n_kl", type=int, default=250)
-    ap.add_argument("--template", default="v1", choices=["v1", "v2"])
+    ap.add_argument("--template", default="v1", choices=["v1", "v2", "v4"])
+    ap.add_argument("--adapter", default=None,
+                    help="peft LoRA adapter dir (fp32 over fp32 base)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -79,6 +81,9 @@ def main():
     device = "cuda"
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype=torch.float32, device_map=device)
+    if args.adapter:
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, args.adapter)
     model.eval()
 
     pairs = pd.read_parquet(args.pairs)

@@ -47,13 +47,14 @@ def build_contexts(tok, problem, a, b, template="v1"):
         return tok.apply_chat_template(
             [{"role": "user", "content": content}],
             tokenize=False, add_generation_prompt=True, enable_thinking=False)
-    if template == "v2":
-        from rl.templates import v2_pair_content, v2_bare_content
+    if template in ("v2", "v4"):
+        from rl import templates as T
         from pilot.grade_countdown_probe import NUMS_RE, TARGET_RE
         nums = [int(x) for x in NUMS_RE.search(problem).group(1).split(",")]
         target = int(TARGET_RE.search(problem).group(1))
-        return (render(v2_pair_content(nums, target, a, b)),
-                render(v2_bare_content(nums, target)))
+        build = T.v4_pair_content if template == "v4" else T.v2_pair_content
+        return (render(build(nums, target, a, b)),
+                render(T.v2_bare_content(nums, target)))
     pair = render(problem + "\n\n" + UNLABELED_TAIL.format(a=a, b=b))
     bare = render(problem)
     return pair, bare
@@ -68,6 +69,7 @@ def main():
     ap.add_argument("--model", default="/scratch/gpfs/ARORA/skaur/models/Qwen3-4B")
     ap.add_argument("--adapter", default=None,
                     help="LoRA adapter dir; omit for base-only run")
+    ap.add_argument("--template", default="v1", choices=["v1", "v2", "v4"])
     ap.add_argument("--out", required=True)
     ap.add_argument("--dry_run", action="store_true",
                     help="build contexts, print one, exit before model load")
@@ -106,7 +108,8 @@ def main():
         p = pairs.loc[qid]
         a, b = ((p["x_plus"], p["x_minus"]) if p["pos_first"]
                 else (p["x_minus"], p["x_plus"]))
-        pair_ctx, bare_ctx = build_contexts(tok, p["problem"], a, b)
+        pair_ctx, bare_ctx = build_contexts(tok, p["problem"], a, b,
+                                            template=args.template)
         r = {"question_id": int(qid)}
         for ctx_name, ctx in (("pair", pair_ctx), ("bare", bare_ctx)):
             for sign, cand in (("plus", p["x_plus"]), ("minus", p["x_minus"])):
