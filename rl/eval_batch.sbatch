@@ -10,10 +10,10 @@
 # Post-training eval batch for grader-RL (SPEC §6), checkpoint step 40:
 #   1. PRIMARY: forward-pass logprob margin, {pair,bare} x {base,adapter},
 #      92 held-out pairs (rl/eval_logprob_margin.py).
-#   2. Adjudication probe with the MERGED model on the same 300 problems as
-#      the pre-RL balanced probe (same parquet, same seed) -- gives the
-#      before/after adjudication cells AND the none/* transfer cells for
-#      Sanjeev's grading->solving hypothesis.
+#   2. Adjudication probe with the ADAPTER (vLLM enable_lora; a bf16 merge
+#      would bury the tiny step-40 delta) on the same 300 problems as the
+#      pre-RL balanced probe -- before/after adjudication cells AND the
+#      none/* transfer cells for Sanjeev's grading->solving hypothesis.
 # Grading of (2) happens on CPU afterwards (grade_countdown_probe.py
 # --probe pilot/probe_countdown_balanced_post.jsonl).
 set -uo pipefail
@@ -23,7 +23,6 @@ source envs/train/.venv/bin/activate || exit 1
 
 CKPT=/scratch/gpfs/ARORA/arora/opsd/rl/checkpoints/grader_grpo_lora_v1
 [ -d "$CKPT/eval_adapter" ] || { echo "eval_adapter missing"; exit 1; }
-[ -d "$CKPT/eval_merged" ] || { echo "eval_merged missing"; exit 1; }
 
 python rl/eval_logprob_margin.py \
     --pairs pilot/countdown_pairs_balanced.parquet \

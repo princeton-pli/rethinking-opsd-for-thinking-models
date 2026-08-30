@@ -83,8 +83,12 @@ def main():
         return
 
     device = "cuda"
+    # fp32 throughout: the step-40 adapter's logit effect (~1e-2) is below
+    # bf16 logit ULP (~0.06 at |logit|~15), and lm_head isn't lora-targeted,
+    # so a bf16 forward would floor the primary metric (CR finding). 4B fp32
+    # fits an H100 with room; both base and adapter runs use the same dtype.
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=torch.bfloat16, device_map=device)
+        args.model, torch_dtype=torch.float32, device_map=device)
     if args.adapter:
         from peft import PeftModel
         model = PeftModel.from_pretrained(model, args.adapter)
