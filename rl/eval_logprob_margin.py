@@ -102,11 +102,24 @@ def main():
         pair_ctx, bare_ctx = build_contexts(tok, p["problem"], a, b)
         r = {"question_id": int(qid)}
         for ctx_name, ctx in (("pair", pair_ctx), ("bare", bare_ctx)):
-            lp_plus = mean_logprob(model, tok, device, ctx, p["x_plus"])
-            lp_minus = mean_logprob(model, tok, device, ctx, p["x_minus"])
-            r[f"lp_plus_{ctx_name}"] = lp_plus
-            r[f"lp_minus_{ctx_name}"] = lp_minus
-            r[f"margin_{ctx_name}"] = lp_plus - lp_minus
+            for sign, cand in (("plus", p["x_plus"]), ("minus", p["x_minus"])):
+                r[f"lp_{sign}_{ctx_name}"] = mean_logprob(
+                    model, tok, device, ctx, cand)
+                # Answer-token variant: mean over only the final \boxed{...}
+                # span, scored with everything before it as context -- the
+                # whole-response mean is dominated by fluency and can dilute
+                # an answer-concentrated correctness signal.
+                bi = cand.rfind("\\boxed{")
+                if bi != -1:
+                    bj = cand.find("}", bi)
+                    bj = len(cand) if bj == -1 else bj + 1
+                    r[f"alp_{sign}_{ctx_name}"] = mean_logprob(
+                        model, tok, device, ctx + cand[:bi], cand[bi:bj])
+            r[f"margin_{ctx_name}"] = (r[f"lp_plus_{ctx_name}"]
+                                       - r[f"lp_minus_{ctx_name}"])
+            if f"alp_plus_{ctx_name}" in r and f"alp_minus_{ctx_name}" in r:
+                r[f"amargin_{ctx_name}"] = (r[f"alp_plus_{ctx_name}"]
+                                            - r[f"alp_minus_{ctx_name}"])
         rows.append(r)
 
     df = pd.DataFrame(rows)
@@ -116,6 +129,10 @@ def main():
         m = df[f"margin_{c}"]
         print(f"[{tag}] {c:4s} context: mean margin {m.mean():+.4f}  "
               f"frac positive {(m > 0).mean():.3f}  n={len(m)}")
+        if f"amargin_{c}" in df:
+            am = df[f"amargin_{c}"].dropna()
+            print(f"[{tag}] {c:4s} ANSWER-TOKENS margin {am.mean():+.4f}  "
+                  f"frac positive {(am > 0).mean():.3f}  n={len(am)}")
 
 
 if __name__ == "__main__":
