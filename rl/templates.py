@@ -38,6 +38,23 @@ V2_PAIR_EPISODE = (
     "final answer within \\boxed{{}}."
 )
 
+# V3 (Sanjeev 2026-08-30): discourage explicit references to the attempts so
+# pair-assisted traces read as organic from-scratch solving (usable as
+# bare-question training data). His phrasing + "or to the students" (38.8% of
+# v2 traces said "student" without "attempt").
+V3_PAIR_PROBE = (
+    "\nBelow, for your private reference only, are two student attempts at "
+    "this instance.\n\n"
+    "ATTEMPT A:\n{a}\n\n"
+    "ATTEMPT B:\n{b}\n\n"
+    "Your reasoning can make use of them but do not explicitly mention, "
+    "quote, or refer to the attempts or to the students in either your "
+    "reasoning or while writing your answer. A reader of your reasoning "
+    "should not be able to tell you saw them.\n\n"
+    "Now work out your own solution. Reason step by step and finish with a "
+    "correct final answer within \\boxed{{}}."
+)
+
 # Probe variant: no prefix, so no continue clause.
 V2_PAIR_PROBE = (
     "\nBelow are two student attempts at this instance.\n\n"
@@ -59,6 +76,12 @@ def v2_pair_content(nums, target, a, b, episode=False):
     return (V2_HEAD.format(nums=", ".join(str(n) for n in nums),
                            target=target)
             + tail.format(a=a, b=b))
+
+
+def v3_pair_content(nums, target, a, b):
+    return (V2_HEAD.format(nums=", ".join(str(n) for n in nums),
+                           target=target)
+            + V3_PAIR_PROBE.format(a=a, b=b))
 
 
 def v2_bare_content(nums, target):
