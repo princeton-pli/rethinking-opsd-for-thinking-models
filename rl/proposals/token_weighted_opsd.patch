@@ -1,0 +1,260 @@
+--- a/opsd/config.py
++++ b/opsd/config.py
+@@ -769,8 +769,58 @@
+             "help": "When True, gated rollouts must produce a wrong answer that also differs (math-equivalence) "
+             "from the teacher-context wrong answer in the 'wrong_answer' column. Only active when "
+             "gate_mode='wrong_only'."
++        },
++    )
++
++    # Parameters that control token-weighted distillation (token-weighted contrastive OPSD)
++    token_weight_mode: str = field(
++        default="none",
++        metadata={
++            "help": "'none' (default, exact pre-patch behaviour) or 'boxed_hybrid'. When 'boxed_hybrid', the "
++            "per-token JSD is reweighted per rollout: token_weight_span on the tokens of the rollout's LAST "
++            "\\boxed{...} span, token_weight_pre_span on the token_weight_pre_span_tokens tokens preceding it, "
++            "and token_weight_epsilon elsewhere. The per-rollout loss is the weight-normalized mean, so every "
++            "rollout contributes at the same scale regardless of trace length or weight profile. Rollouts with "
++            "no boxed span get all-zero weight (dropped from the loss exactly like gate failures) and are "
++            "counted in the weights/no_span_fraction metric. Motivated by the 2026-08-30 sparse-signal result: "
++            "the pair-specific correctness signal sits at the wrong trace's own answer slot (+0.925 nats, "
++            "29 sigma, positive on 90.9% of wrong rollouts) while uniform weighting buries it ~100:1 under "
++            "pair-conditioned style KL spread over the trace. Requires loss_max_completion_tokens=0: the span "
++            "sits at the trace END (median ~10.9k tokens on the Arm-1 data), so a first-N loss window would "
++            "silently truncate it out of the loss."
++        },
++    )
++    token_weight_epsilon: float = field(
++        default=0.001,
++        metadata={
++            "help": "Weight on tokens outside the boxed span and the pre-span window. 0 disables off-window "
++            "distillation entirely; small positive values keep a bounded amount of the paper's full-trace "
++            "distillation as a hedge. At the Arm-1 median trace length (10.9k tokens) 0.001 leaves roughly a "
++            "quarter of the total weight mass off-window. Only active when token_weight_mode='boxed_hybrid'."
+         },
+     )
++    token_weight_span: float = field(
++        default=1.0,
++        metadata={
++            "help": "Weight on the tokens of the rollout's last \\boxed{...} span (opener through matching "
++            "closing brace). Only active when token_weight_mode='boxed_hybrid'."
++        },
++    )
++    token_weight_pre_span: float = field(
++        default=0.05,
++        metadata={
++            "help": "Weight on the token_weight_pre_span_tokens tokens immediately before the boxed span (the "
++            "final-answer-statement region). Only active when token_weight_mode='boxed_hybrid'."
++        },
++    )
++    token_weight_pre_span_tokens: int = field(
++        default=256,
++        metadata={
++            "help": "Length in tokens of the moderate-weight window before the boxed span. 0 reduces "
++            "'boxed_hybrid' to the pure hard-window profile (a). Only active when "
++            "token_weight_mode='boxed_hybrid'."
++        },
++    )
+ 
+     # Parameters that control critique-conditioned self-teaching
+     use_critique: bool = field(
+--- a/opsd/trainer.py
++++ b/opsd/trainer.py
+@@ -2383,6 +2383,40 @@
+             completion_mask = completion_mask[:, :loss_tokens]
+             if sampling_per_token_logps is not None:
+                 sampling_per_token_logps = sampling_per_token_logps[:, :loss_tokens]
++
++        # Token-weighted contrastive OPSD: per-token loss weights concentrated on
++        # the rollout's own final \boxed{...} span, where the pair-specific
++        # correctness signal was measured (+0.925 nats, 29 sigma; see
++        # rl/eval_sparse_signal.py), instead of uniformly over the trace, where
++        # ~99% of the gradient is pair-conditioned style KL. Rollouts with no
++        # boxed span get all-zero weight and drop out of the loss the same way
++        # gate failures do -- falling back to uniform there would silently
++        # reintroduce exactly the style distillation this mode removes. Runs
++        # AFTER gate regeneration (completion_ids_list is final) and after the
++        # loss-window truncation (indices are clipped to the loss width, though
++        # train.py forbids combining the two).
++        token_loss_weights = None
++        if getattr(self.args, "token_weight_mode", "none") == "boxed_hybrid" and mode == "train":
++            weight_width = completion_ids.size(1)
++            w_rows, n_no_span = [], 0
++            for ids in completion_ids_list:
++                w = torch.full((weight_width,), float(self.args.token_weight_epsilon), device=device)
++                span = locate_boxed_span(list(ids), self.processing_class.decode)
++                if span is None:
++                    w.zero_()
++                    n_no_span += 1
++                else:
++                    s, e = min(span[0], weight_width), min(span[1], weight_width)
++                    k = int(self.args.token_weight_pre_span_tokens)
++                    if k > 0:
++                        w[max(0, s - k):s] = float(self.args.token_weight_pre_span)
++                    w[s:e] = float(self.args.token_weight_span)
++                w_rows.append(w)
++            token_loss_weights = torch.stack(w_rows)
++            agg_no_span = self.accelerator.gather(
++                torch.tensor(n_no_span / max(len(completion_ids_list), 1), device=device)
++            )
++            self._metrics[mode]["weights/no_span_fraction"].append(agg_no_span.mean().item())
+ 
+         # Concatenate prompt_mask with completion_mask for logit computation
+         prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)  # (B, P+C)
+@@ -2542,6 +2576,8 @@
+             output["old_per_token_logps"] = old_per_token_logps
+         if importance_sampling_ratio is not None:
+             output["importance_sampling_ratio"] = importance_sampling_ratio
++        if token_loss_weights is not None:
++            output["token_loss_weights"] = token_loss_weights
+         if ref_per_token_logps is not None:
+             output["ref_per_token_logps"] = ref_per_token_logps
+         if "pixel_values" in forward_kwargs:
+@@ -2648,12 +2684,24 @@
+         if entropy_mask is not None:
+             per_token_loss = per_token_loss * entropy_mask
+ 
+-        per_seq_loss = (per_token_loss * loss_completion_mask).sum(-1) / loss_completion_mask.sum(-1).clamp(min=1.0)
++        # Token-weighted path: weight-normalized mean per rollout, so every rollout
++        # contributes at the same scale regardless of trace length or weight
++        # profile (per-rollout weight sum is normalized away). Rows whose combined
++        # weights are all zero (no boxed span, or killed by the gate/truncation
++        # masks) drop out of the row average below. The default path is unchanged
++        # from the pre-patch behaviour.
++        token_loss_weights = inputs.get("token_loss_weights")
++        if token_loss_weights is not None:
++            loss_weights = loss_completion_mask * token_loss_weights
++            per_seq_loss = (per_token_loss * loss_weights).sum(-1) / loss_weights.sum(-1).clamp(min=1e-6)
++            live_rows = (loss_weights.sum(-1) > 0).float()
++        else:
++            per_seq_loss = (per_token_loss * loss_completion_mask).sum(-1) / loss_completion_mask.sum(-1).clamp(min=1.0)
++            live_rows = (loss_completion_mask.sum(-1) > 0).float()
+         if self.args.gate_mode == "wrong_only":
+             # Average over live (non-zero-mask) rows only, so gated-out rows do not
+             # dilute the step: each step is a mean over the same effective batch of
+             # gated rollouts regardless of how many rows the gate killed.
+-            live_rows = (loss_completion_mask.sum(-1) > 0).float()
+             loss = (per_seq_loss * live_rows).sum() / live_rows.sum().clamp(min=1.0)
+         else:
+             loss = per_seq_loss.mean()
+@@ -2748,6 +2796,63 @@
+         super()._save_checkpoint(model, trial)
+ 
+ 
++def locate_boxed_span(ids, decode):
++    """Token-space span of the LAST ``\\boxed{...}`` in a completion, or None.
++
++    Pure function: ``ids`` is a list of token ids, ``decode`` is any callable
++    mapping a list of token ids to text (e.g. ``tokenizer.decode``). Returns a
++    half-open token interval ``(start, end)`` covering the opener ``\\boxed{``
++    through the matching closing brace (clipped to the end of ``ids`` when the
++    box is unclosed, i.e. the trace was truncated mid-box).
++
++    The char->token mapping is a binary search over prefix-decode lengths, so
++    it is tokenizer-agnostic (no assumption about how ``\\boxed{`` splits into
++    tokens). ``len(decode(ids[:t]))`` is nondecreasing in ``t``; a token
++    boundary that splits a multi-byte char can perturb the boundary by a token,
++    which is harmless here because the span content is ASCII math.
++
++    Tests (run with ``python -m doctest opsd/trainer.py``); the toy decode
++    treats each character as one token, which makes token indices char indices:
++
++    >>> dec = lambda ids: "".join(ids)
++    >>> span = locate_boxed_span(list("x = \\\\boxed{42}."), dec)
++    >>> span, "".join(list("x = \\\\boxed{42}.")[span[0]:span[1]])
++    ((4, 14), '\\\\boxed{42}')
++    >>> s = list("\\\\boxed{\\\\frac{1}{2}}!")     # nested braces -> outer close
++    >>> span = locate_boxed_span(s, dec); span, "".join(s[span[0]:span[1]])
++    ((0, 19), '\\\\boxed{\\\\frac{1}{2}}')
++    >>> s = list("\\\\boxed{1} or \\\\boxed{2}")   # multiple boxes -> last one
++    >>> span = locate_boxed_span(s, dec); "".join(s[span[0]:span[1]])
++    '\\\\boxed{2}'
++    >>> locate_boxed_span(list("no box here"), dec) is None
++    True
++    >>> locate_boxed_span(list("\\\\boxed{12"), dec)  # unclosed -> clip to end
++    (0, 9)
++    """
++    text = decode(ids)
++    i = text.rfind("\\boxed{")
++    if i == -1:
++        return None
++    depth, j = 1, i + len("\\boxed{")
++    while j < len(text) and depth:
++        depth += (text[j] == "{") - (text[j] == "}")
++        j += 1
++
++    def tok_at(char_idx):
++        # smallest t with len(decode(ids[:t])) > char_idx; that prefix's last
++        # token (t - 1) is the token containing char_idx
++        lo, hi = 1, len(ids)
++        while lo < hi:
++            mid = (lo + hi) // 2
++            if len(decode(ids[:mid])) > char_idx:
++                hi = mid
++            else:
++                lo = mid + 1
++        return lo - 1
++
++    return tok_at(i), tok_at(j - 1) + 1
++
++
+ def prepare_distil_dataset(
+     dataset: Dataset,
+     prompt_key: str = "prompt",
+--- a/train.py
++++ b/train.py
+@@ -143,6 +143,17 @@
+                         help="Dataset column holding the scalar gold answer used for gate grading")
+     parser.add_argument("--gate_wrong_answer_key", type=str, default=None,
+                         help="Dataset column holding the in-context wrong answer used for gate grading")
++    parser.add_argument("--token_weight_mode", type=str, default="none", choices=["none", "boxed_hybrid"],
++                        help="'boxed_hybrid': reweight the per-token JSD toward the rollout's last \\boxed{...} "
++                             "span (see DistilConfig.token_weight_mode). Default 'none' = pre-patch behaviour.")
++    parser.add_argument("--token_weight_epsilon", type=float, default=0.001,
++                        help="Weight on tokens outside the boxed span and pre-span window")
++    parser.add_argument("--token_weight_span", type=float, default=1.0,
++                        help="Weight on the boxed-span tokens")
++    parser.add_argument("--token_weight_pre_span", type=float, default=0.05,
++                        help="Weight on the window of tokens immediately before the boxed span")
++    parser.add_argument("--token_weight_pre_span_tokens", type=int, default=256,
++                        help="Length in tokens of the pre-span window (0 = pure hard window)")
+     parser.add_argument("--use_onpolicy_demos", type=parse_bool, default=False,
+                        help="Use correct on-policy completions as teacher demos instead of gold answers")
+     parser.add_argument("--onpolicy_demo_reward_threshold", type=float, default=1.0,
+@@ -325,6 +336,21 @@
+                      f"regen_rounds={args.gate_max_regen_rounds}, "
+                      f"require_diff_answer={args.gate_require_diff_answer})")
+ 
++    if args.token_weight_mode != "none":
++        # The boxed span sits at the trace END (median ~10.9k tokens on the Arm-1
++        # data). A first-N loss window would truncate it out of the loss and
++        # silently reduce every row to near-zero weight -- fail loudly instead.
++        # Full-window memory: see rl/proposals/token_weighted_opsd.md.
++        assert args.loss_max_completion_tokens == 0, (
++            "token_weight_mode requires --loss_max_completion_tokens 0 (loss over the full trace); "
++            f"got {args.loss_max_completion_tokens}. Use --jsd_chunk_size 1024 for the memory peak."
++        )
++        assert not args.speculative_generation and not args.splice_generation and not args.generate_from_teacher, \
++            "token_weight_mode is untested with speculative/splice/teacher generation"
++        logging.info(f"Token-weighted distillation: ENABLED (mode={args.token_weight_mode}, "
++                     f"epsilon={args.token_weight_epsilon}, span={args.token_weight_span}, "
++                     f"pre_span={args.token_weight_pre_span} x {args.token_weight_pre_span_tokens} tokens)")
++
+     train_dataset = prepare_distil_dataset(
+         raw_dataset,
+         prompt_key=args.prompt_key,
+@@ -400,6 +426,13 @@
+         "gate_max_regen_rounds": args.gate_max_regen_rounds,
+         "gate_require_diff_answer": args.gate_require_diff_answer,
+ 
++        # Token-weighted distillation settings (token-weighted contrastive OPSD)
++        "token_weight_mode": args.token_weight_mode,
++        "token_weight_epsilon": args.token_weight_epsilon,
++        "token_weight_span": args.token_weight_span,
++        "token_weight_pre_span": args.token_weight_pre_span,
++        "token_weight_pre_span_tokens": args.token_weight_pre_span_tokens,
++
+         # Critique-conditioned self-teaching settings
+         "use_critique": args.use_critique,
+         "critique_max_prompt_length": args.critique_max_prompt_length,
