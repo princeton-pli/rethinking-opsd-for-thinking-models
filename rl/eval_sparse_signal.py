@@ -71,6 +71,7 @@ def main():
     ap.add_argument("--model", default="/scratch/gpfs/ARORA/skaur/models/Qwen3-4B")
     ap.add_argument("--n_slot", type=int, default=922)
     ap.add_argument("--n_kl", type=int, default=250)
+    ap.add_argument("--template", default="v1", choices=["v1", "v2"])
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -95,7 +96,8 @@ def main():
             continue
         a, b = ((p["x_plus"], p["x_minus"]) if p["pos_first"]
                 else (p["x_minus"], p["x_plus"]))
-        pair_ctx, bare_ctx = build_contexts(tok, p["problem"], a, b)
+        pair_ctx, bare_ctx = build_contexts(tok, p["problem"], a, b,
+                                            template=args.template)
         r = {"question_id": int(p["question_id"])}
 
         if k < args.n_slot:

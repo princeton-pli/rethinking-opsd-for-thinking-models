@@ -40,13 +40,20 @@ def mean_logprob(model, tok, device, context_text, candidate_text):
     return cand_lp.mean().item()
 
 
-def build_contexts(tok, problem, a, b):
+def build_contexts(tok, problem, a, b, template="v1"):
     """(pair context, bare context), both ending at the assistant nothink
     generation start so the candidate is scored as the visible response."""
     def render(content):
         return tok.apply_chat_template(
             [{"role": "user", "content": content}],
             tokenize=False, add_generation_prompt=True, enable_thinking=False)
+    if template == "v2":
+        from rl.templates import v2_pair_content, v2_bare_content
+        from pilot.grade_countdown_probe import NUMS_RE, TARGET_RE
+        nums = [int(x) for x in NUMS_RE.search(problem).group(1).split(",")]
+        target = int(TARGET_RE.search(problem).group(1))
+        return (render(v2_pair_content(nums, target, a, b)),
+                render(v2_bare_content(nums, target)))
     pair = render(problem + "\n\n" + UNLABELED_TAIL.format(a=a, b=b))
     bare = render(problem)
     return pair, bare

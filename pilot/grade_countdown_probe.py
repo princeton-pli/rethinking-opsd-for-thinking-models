@@ -42,6 +42,8 @@ def independent_grade(expr_text, nums, target):
         val = eval(e)
     except Exception:
         return False
+    if not isinstance(val, (int, float)):
+        return False       # e.g. a literal "..." evals to Ellipsis
     if abs(val - float(target)) > 1e-5:
         return False
     used = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", e)]
