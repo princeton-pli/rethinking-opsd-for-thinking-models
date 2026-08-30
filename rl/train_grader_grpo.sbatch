@@ -23,7 +23,7 @@ cd /scratch/gpfs/ARORA/arora/opsd || exit 1
 source slurm/cluster_env.sh || exit 1
 source /scratch/gpfs/ARORA/arora/della-post-training/envs/rlvr/.venv/bin/activate || exit 1
 
-EPISODES=${EPISODES:-rl/episodes_balanced}
+EPISODES=${EPISODES:-rl/episodes_balanced_v2tpl}
 [ -f "$EPISODES/train.parquet" ] || { echo "episodes missing: $EPISODES"; exit 1; }
 python rl/reward_countdown.py || { echo "reward regression cases FAILED"; exit 1; }
 
@@ -33,7 +33,7 @@ export WANDB_MODE="offline"
 # slurm_rlvr.sh: point it at the pre-downloaded cache.
 export TIKTOKEN_ENCODINGS_BASE=/scratch/gpfs/ARORA/arora/della-post-training/envs/harmony_encodings
 MODEL=/scratch/gpfs/ARORA/skaur/models/Qwen3-4B
-OUT=${OUT:-/scratch/gpfs/ARORA/arora/opsd/rl/checkpoints/grader_grpo_lora_v1}
+OUT=${OUT:-/scratch/gpfs/ARORA/arora/opsd/rl/checkpoints/grader_grpo_lora_v2}
 TPL="{% for m in messages %}{{ m['content'] }}{% endfor %}"
 
 python3 -m verl.trainer.main_ppo \
@@ -54,14 +54,15 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.target_modules=all-linear \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr=2e-5 \
+    actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.2 \
     actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
-    actor_rollout_ref.actor.loss_agg_mode=token-mean \
+    actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-sum \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.name=vllm \
@@ -83,7 +84,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=1 \
     trainer.default_local_dir="$OUT" \
     trainer.project_name=grader_rl \
-    trainer.experiment_name=grader_grpo_lora_v1 \
+    trainer.experiment_name=grader_grpo_lora_v2 \
     trainer.balance_batch=False \
     custom_reward_function.path=/scratch/gpfs/ARORA/arora/opsd/rl/reward_countdown.py \
     custom_reward_function.name=compute_score
