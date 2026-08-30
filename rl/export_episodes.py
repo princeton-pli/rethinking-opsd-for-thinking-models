@@ -41,9 +41,11 @@ def main():
     ap.add_argument("--max_prompt_tokens", type=int, default=12288)
     ap.add_argument("--test_frac", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--template", default="v1", choices=["v1", "v2"],
-                    help="v2 = the restructured phrasing (episode variant "
-                         "with the continue-your-reasoning clause)")
+    ap.add_argument("--template", default="v1", choices=["v1", "v2", "v4"],
+                    help="v2 = restructured phrasing; v4 = v2 body + "
+                         "no-reference secrecy contract (the OPSD-aligned "
+                         "training template); both use the episode variant "
+                         "with the continue-your-reasoning clause")
     ap.add_argument("--out_dir", required=True)
     args = ap.parse_args()
 
@@ -65,11 +67,12 @@ def main():
         nums = [int(x) for x in NUMS_RE.search(p["problem"]).group(1).split(",")]
         a, b = ((p["x_plus"], p["x_minus"]) if p["pos_first"]
                 else (p["x_minus"], p["x_plus"]))
-        if args.template == "v2":
-            from rl.templates import v2_pair_content
+        if args.template in ("v2", "v4"):
+            from rl.templates import v2_pair_content, v4_pair_content
             target = int(re.search(r"Target:\s*(-?\d+)",
                                    p["problem"]).group(1))
-            content = v2_pair_content(nums, target, a, b, episode=True)
+            build = v4_pair_content if args.template == "v4" else v2_pair_content
+            content = build(nums, target, a, b, episode=True)
         else:
             content = p["problem"] + "\n\n" + UNLABELED_TAIL.format(a=a, b=b)
         head = ("<|im_start|>user\n" + content + "<|im_end|>\n"

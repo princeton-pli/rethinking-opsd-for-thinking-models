@@ -75,6 +75,27 @@ V4_PAIR_PROBE = (
     "final answer within \\boxed{{}}."
 )
 
+# V4 episode variant: same secrecy contract, plus the continue-clause for the
+# partial trace in the <think> channel. This is the GRADER-RL/OPSD training
+# template (Sanjeev, 2026-08-30): the teacher must expect REFERENCE-FREE
+# pair-conditioned thinking, because the student rollouts it will score are
+# reference-free by construction.
+V4_PAIR_EPISODE = (
+    "\nThis is an unusual test. You have to solve the provided instance of "
+    "the COUNTDOWN task. Below are two student attempts which may contain "
+    "useful ideas for you. Here is the catch: you *cannot* explicitly "
+    "mention, quote, or refer to the attempts or their authors anywhere in "
+    "your output -- not in your final answer, and not in your thinking, "
+    "i.e. the text between <think> and </think>. Write your entire thinking "
+    "as if you are solving from scratch and had never seen the attempts.\n"
+    "**Important**: someone reading your thinking should not be able to "
+    "tell that you saw the student attempts.\n\n"
+    "{a}\n\n---\n\n{b}\n\n"
+    "Now solve the instance. Continue your reasoning from where it leaves "
+    "off, fixing any errors along the way, and finish with a correct final "
+    "answer within \\boxed{{}}."
+)
+
 # Probe variant: no prefix, so no continue clause.
 V2_PAIR_PROBE = (
     "\nBelow are two student attempts at this instance.\n\n"
@@ -104,10 +125,11 @@ def v3_pair_content(nums, target, a, b):
             + V3_PAIR_PROBE.format(a=a, b=b))
 
 
-def v4_pair_content(nums, target, a, b):
+def v4_pair_content(nums, target, a, b, episode=False):
+    tail = V4_PAIR_EPISODE if episode else V4_PAIR_PROBE
     return (V2_HEAD.format(nums=", ".join(str(n) for n in nums),
                            target=target)
-            + V4_PAIR_PROBE.format(a=a, b=b))
+            + tail.format(a=a, b=b))
 
 
 def v2_bare_content(nums, target):

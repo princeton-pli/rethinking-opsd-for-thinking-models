@@ -23,7 +23,7 @@ cd /scratch/gpfs/ARORA/arora/opsd || exit 1
 source slurm/cluster_env.sh || exit 1
 source /scratch/gpfs/ARORA/arora/della-post-training/envs/rlvr/.venv/bin/activate || exit 1
 
-EPISODES=${EPISODES:-rl/episodes_balanced_v2tpl}
+EPISODES=${EPISODES:-rl/episodes_balanced_v4tpl}
 [ -f "$EPISODES/train.parquet" ] || { echo "episodes missing: $EPISODES"; exit 1; }
 python rl/reward_countdown.py || { echo "reward regression cases FAILED"; exit 1; }
 
@@ -33,7 +33,7 @@ export WANDB_MODE="offline"
 # slurm_rlvr.sh: point it at the pre-downloaded cache.
 export TIKTOKEN_ENCODINGS_BASE=/scratch/gpfs/ARORA/arora/della-post-training/envs/harmony_encodings
 MODEL=/scratch/gpfs/ARORA/skaur/models/Qwen3-4B
-OUT=${OUT:-/scratch/gpfs/ARORA/arora/opsd/rl/checkpoints/grader_grpo_lora_v2}
+OUT=${OUT:-/scratch/gpfs/ARORA/arora/opsd/rl/checkpoints/grader_grpo_lora_v4tpl}
 TPL="{% for m in messages %}{{ m['content'] }}{% endfor %}"
 
 python3 -m verl.trainer.main_ppo \
@@ -84,7 +84,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=1 \
     trainer.default_local_dir="$OUT" \
     trainer.project_name=grader_rl \
-    trainer.experiment_name=grader_grpo_lora_v2 \
+    trainer.experiment_name=grader_grpo_lora_v4tpl \
     trainer.balance_batch=False \
     custom_reward_function.path=/scratch/gpfs/ARORA/arora/opsd/rl/reward_countdown.py \
     custom_reward_function.name=compute_score
