@@ -96,6 +96,16 @@ V4_PAIR_EPISODE = (
     "answer within \\boxed{{}}."
 )
 
+# Self-check suffix (Sanjeev 2026-08-31): rule-by-rule verification of one's
+# own answer before finalizing. Appended to solving prompts as variant "v2c".
+SELF_CHECK = (
+    " Before finalizing your answer, check it against each rule, one at a "
+    "time: every number in LIST used exactly once (write them out with "
+    "multiplicity), only +, -, *, / and parentheses used, and the "
+    "expression evaluates to TARGET. If any check fails, fix your "
+    "expression before answering."
+)
+
 # Probe variant: no prefix, so no continue clause.
 V2_PAIR_PROBE = (
     "\nBelow are two student attempts at this instance.\n\n"
@@ -123,6 +133,14 @@ def v3_pair_content(nums, target, a, b):
     return (V2_HEAD.format(nums=", ".join(str(n) for n in nums),
                            target=target)
             + V3_PAIR_PROBE.format(a=a, b=b))
+
+
+def v2c_pair_content(nums, target, a, b):
+    return v2_pair_content(nums, target, a, b) + SELF_CHECK
+
+
+def v2c_bare_content(nums, target):
+    return v2_bare_content(nums, target) + SELF_CHECK
 
 
 def v4_pair_content(nums, target, a, b, episode=False):

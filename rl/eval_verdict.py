@@ -28,6 +28,19 @@ VERDICT_TAIL = (
     "ATTEMPT:\n{x}\n\n"
     "Is this attempt a correct solution? Answer yes or no."
 )
+
+# Sanjeev 2026-08-31: rule-by-rule decision checklist.
+VERDICT_CHECK_TAIL = (
+    "\nBelow is a student attempt at this instance.\n\n"
+    "ATTEMPT:\n{x}\n\n"
+    "Check the attempt against each rule, one at a time:\n"
+    "1. Write out the numbers used in its final expression, with "
+    "multiplicity. Is this exactly the multiset LIST?\n"
+    "2. Evaluate the final expression step by step. Does it equal TARGET?\n"
+    "3. Does it use only +, -, *, / and parentheses?\n"
+    "Then answer yes if the attempt is a correct solution, or no if it "
+    "is not."
+)
 YES_RE = re.compile(r"\b(yes|no)\b", re.IGNORECASE)
 
 
@@ -37,8 +50,10 @@ def main():
     ap.add_argument("--model", default="/scratch/gpfs/ARORA/skaur/models/Qwen3-4B")
     ap.add_argument("--adapter", default=None)
     ap.add_argument("--n_problems", type=int, default=300)
+    ap.add_argument("--checklist", action="store_true")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+    tail = VERDICT_CHECK_TAIL if args.checklist else VERDICT_TAIL
 
     df = pd.read_parquet(args.pairs).sample(
         n=args.n_problems, random_state=0)
@@ -51,7 +66,7 @@ def main():
         head = V2_HEAD.format(nums=", ".join(str(n) for n in nums),
                               target=target)
         for cand, text in (("plus", r["x_plus"]), ("minus", r["x_minus"])):
-            content = head + VERDICT_TAIL.format(x=text)
+            content = head + tail.format(x=text)
             for think in (False, True):
                 prompts.append((tok.apply_chat_template(
                     [{"role": "user", "content": content}], tokenize=False,

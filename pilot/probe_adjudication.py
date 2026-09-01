@@ -56,7 +56,7 @@ def main():
                          "(a bf16-merged model would bury a small adapter "
                          "below quantization noise)")
     ap.add_argument("--template", default="v1",
-                    choices=["v1", "v2", "v3", "v4"],
+                    choices=["v1", "v2", "v3", "v4", "v2c"],
                     help="v2 = Sanjeev's 2026-08-30 restructured phrasing; "
                          "v3 = v2 + no-reference instruction "
                          "(rl/templates.py); v2/v3 run none+unlabeled cells "
@@ -78,16 +78,17 @@ def main():
     for qid, r in d.iterrows():
         # Reconstruct the exemplar order the Arm-1 context used (pos_first).
         a, b = (r["x_plus"], r["x_minus"]) if r["pos_first"] else (r["x_minus"], r["x_plus"])
-        if args.template in ("v2", "v3", "v4"):
+        if args.template in ("v2", "v3", "v4", "v2c"):
             from rl import templates as T
             from pilot.grade_countdown_probe import NUMS_RE, TARGET_RE
-            v2_bare_content = T.v2_bare_content
             nums = [int(x) for x in
                     NUMS_RE.search(r["problem"]).group(1).split(",")]
             target = int(TARGET_RE.search(r["problem"]).group(1))
             build = getattr(T, f"{args.template}_pair_content")
+            bare = (T.v2c_bare_content if args.template == "v2c"
+                    else T.v2_bare_content)
             contexts = {
-                "none": v2_bare_content(nums, target),
+                "none": bare(nums, target),
                 "unlabeled": build(nums, target, a, b),
             }
         else:
