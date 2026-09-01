@@ -72,6 +72,19 @@ GATE_REQUIRE_DIFF_ANSWER=${GATE_REQUIRE_DIFF_ANSWER:-True}
 GATE_GOLD_ANSWER_KEY=${GATE_GOLD_ANSWER_KEY:-""}
 GATE_WRONG_ANSWER_KEY=${GATE_WRONG_ANSWER_KEY:-""}
 
+# Token-weighted distillation (token-weighted contrastive OPSD; see
+# rl/proposals/token_weighted_opsd.md). Mirrors the GATE_MODE passthrough.
+TOKEN_WEIGHT_MODE=${TOKEN_WEIGHT_MODE:-none}
+TOKEN_WEIGHT_EPSILON=${TOKEN_WEIGHT_EPSILON:-0.001}
+TOKEN_WEIGHT_SPAN=${TOKEN_WEIGHT_SPAN:-1.0}
+TOKEN_WEIGHT_MID=${TOKEN_WEIGHT_MID:-0.2}
+TOKEN_WEIGHT_TAIL_TOKENS=${TOKEN_WEIGHT_TAIL_TOKENS:-4096}
+TOKEN_WEIGHT_PRE_SPAN=${TOKEN_WEIGHT_PRE_SPAN:-0.05}
+TOKEN_WEIGHT_PRE_SPAN_TOKENS=${TOKEN_WEIGHT_PRE_SPAN_TOKENS:-256}
+
+# Frozen swapped teacher (empty = self-teacher from BASE_MODEL, the default)
+TEACHER_MODEL=${TEACHER_MODEL:-""}
+
 # Training hyperparameters
 OPSD_LR=${OPSD_LR:-5e-6}
 OPSD_EPOCHS=${OPSD_EPOCHS:-1}
@@ -98,7 +111,19 @@ GATE_SUFFIX=""
 if [ "${GATE_MODE}" != "none" ]; then
     GATE_SUFFIX="__gate_${GATE_MODE}"
 fi
-export OPSD_CHECKPOINT_PATH="checkpoints/opsd__m_${model_basename}__d_${data_basename}__alpha${OPSD_ALPHA}__bs${OPSD_TRUE_BATCH_SIZE}__lr${OPSD_LR}__ep${OPSD_EPOCHS}${MPL_SUFFIX}${FT_SUFFIX}${NOTHINK_SUFFIX}${GATE_SUFFIX}"
+# Token-weight mode and swapped teacher are run identity: without these
+# suffixes a rerun with a different mode/teacher would hit the
+# checkpoint-exists skip below and silently re-evaluate the wrong model
+# (the standing DATASET_NAME gotcha, arm1_launch.sh).
+TW_SUFFIX=""
+if [ "${TOKEN_WEIGHT_MODE}" != "none" ]; then
+    TW_SUFFIX="__tw_${TOKEN_WEIGHT_MODE}"
+fi
+TCHR_SUFFIX=""
+if [ -n "${TEACHER_MODEL}" ]; then
+    TCHR_SUFFIX="__tchr_$(basename "$(dirname "${TEACHER_MODEL}")")_$(basename "${TEACHER_MODEL}")"
+fi
+export OPSD_CHECKPOINT_PATH="checkpoints/opsd__m_${model_basename}__d_${data_basename}__alpha${OPSD_ALPHA}__bs${OPSD_TRUE_BATCH_SIZE}__lr${OPSD_LR}__ep${OPSD_EPOCHS}${MPL_SUFFIX}${FT_SUFFIX}${NOTHINK_SUFFIX}${GATE_SUFFIX}${TW_SUFFIX}${TCHR_SUFFIX}"
 mkdir -p "$OPSD_CHECKPOINT_PATH"
 
 echo "=============================================="
@@ -180,6 +205,14 @@ train() {
         --gate_require_diff_answer="${GATE_REQUIRE_DIFF_ANSWER}" \
         ${GATE_GOLD_ANSWER_KEY:+--gate_gold_answer_key="${GATE_GOLD_ANSWER_KEY}"} \
         ${GATE_WRONG_ANSWER_KEY:+--gate_wrong_answer_key="${GATE_WRONG_ANSWER_KEY}"} \
+        --token_weight_mode="${TOKEN_WEIGHT_MODE}" \
+        --token_weight_epsilon="${TOKEN_WEIGHT_EPSILON}" \
+        --token_weight_span="${TOKEN_WEIGHT_SPAN}" \
+        --token_weight_mid="${TOKEN_WEIGHT_MID}" \
+        --token_weight_tail_tokens="${TOKEN_WEIGHT_TAIL_TOKENS}" \
+        --token_weight_pre_span="${TOKEN_WEIGHT_PRE_SPAN}" \
+        --token_weight_pre_span_tokens="${TOKEN_WEIGHT_PRE_SPAN_TOKENS}" \
+        ${TEACHER_MODEL:+--teacher_model_name="${TEACHER_MODEL}"} \
         --enable_thinking="${ENABLE_THINKING}"
 }
 

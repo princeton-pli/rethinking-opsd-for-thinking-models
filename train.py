@@ -64,7 +64,14 @@ def parse_args():
     
     # Model arguments
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-7B-Instruct", help="Model name or path")
-    parser.add_argument("--tokenizer_name", type=str, default=None, help="Tokenizer name (defaults to model_name)")
+    parser.add_argument("--teacher_model_name", type=str, default=None,
+                        help="Model name or path for the FROZEN teacher (ref_model). Defaults to --model_name, "
+                             "which is the paper's self-teacher setup. Set to a different dir (e.g. a merged "
+                             "RL'd-grader checkpoint) for teacher-swap arms. Must share the student's tokenizer "
+                             "(the teacher scores the student's token ids under the teacher context). Requires "
+                             "--sync_ref_model=False and --generate_from_teacher=False: EMA-mixing a "
+                             "different-init teacher toward the student is neither self-distillation nor a "
+                             "frozen swapped teacher, and generation must stay on-policy (student).")
     parser.add_argument("--wandb_project", type=str, default=os.environ.get("WANDB_PROJECT", "better-than-sft"), help="Wandb project name")
     parser.add_argument("--run_name", type=str, default=None, help="Wandb run name (defaults to output_dir basename)")
     
@@ -317,7 +324,14 @@ if __name__ == "__main__":
         model_kwargs["use_cache"] = False
 
     model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_kwargs)
-    teacher_model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_kwargs)
+    teacher_name = args.teacher_model_name or args.model_name
+    if args.teacher_model_name:
+        assert not args.sync_ref_model, \
+            "--teacher_model_name requires --sync_ref_model=False (frozen swapped teacher)"
+        assert not args.generate_from_teacher, \
+            "--teacher_model_name requires --generate_from_teacher=False (rollouts stay on-policy student)"
+        logging.info(f"Teacher swap: FROZEN teacher loaded from {teacher_name} (student: {args.model_name})")
+    teacher_model = AutoModelForCausalLM.from_pretrained(teacher_name, **model_kwargs)
     
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
