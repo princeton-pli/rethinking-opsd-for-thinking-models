@@ -143,6 +143,23 @@ def parse_args():
                         help="Dataset column holding the scalar gold answer used for gate grading")
     parser.add_argument("--gate_wrong_answer_key", type=str, default=None,
                         help="Dataset column holding the in-context wrong answer used for gate grading")
+    parser.add_argument("--token_weight_mode", type=str, default="none",
+                        choices=["none", "boxed_hybrid", "numeric-skeleton"],
+                        help="'boxed_hybrid': reweight the per-token JSD toward the rollout's last \\boxed{...} "
+                             "span. 'numeric-skeleton' (recommended): boxed span at token_weight_span plus every "
+                             "intermediate 'a op b = c' result token at token_weight_mid (see "
+                             "DistilConfig.token_weight_mode). Default 'none' = pre-patch behaviour.")
+    parser.add_argument("--token_weight_epsilon", type=float, default=0.001,
+                        help="Weight on tokens outside the boxed span and pre-span window")
+    parser.add_argument("--token_weight_span", type=float, default=1.0,
+                        help="Weight on the boxed-span tokens")
+    parser.add_argument("--token_weight_pre_span", type=float, default=0.05,
+                        help="Weight on the window of tokens immediately before the boxed span")
+    parser.add_argument("--token_weight_pre_span_tokens", type=int, default=256,
+                        help="Length in tokens of the pre-span window (0 = pure hard window)")
+    parser.add_argument("--token_weight_mid", type=float, default=0.2,
+                        help="Weight on every intermediate 'a op b = c' result token "
+                             "(numeric-skeleton mode only)")
     parser.add_argument("--use_onpolicy_demos", type=parse_bool, default=False,
                        help="Use correct on-policy completions as teacher demos instead of gold answers")
     parser.add_argument("--onpolicy_demo_reward_threshold", type=float, default=1.0,
@@ -325,6 +342,22 @@ if __name__ == "__main__":
                      f"regen_rounds={args.gate_max_regen_rounds}, "
                      f"require_diff_answer={args.gate_require_diff_answer})")
 
+    if args.token_weight_mode != "none":
+        # The boxed span sits at the trace END (median ~10.9k tokens on the Arm-1
+        # data). A first-N loss window would truncate it out of the loss and
+        # silently reduce every row to near-zero weight -- fail loudly instead.
+        # Full-window memory: see rl/proposals/token_weighted_opsd.md.
+        assert args.loss_max_completion_tokens == 0, (
+            "token_weight_mode requires --loss_max_completion_tokens 0 (loss over the full trace); "
+            f"got {args.loss_max_completion_tokens}. Use --jsd_chunk_size 1024 for the memory peak."
+        )
+        assert not args.speculative_generation and not args.splice_generation and not args.generate_from_teacher, \
+            "token_weight_mode is untested with speculative/splice/teacher generation"
+        logging.info(f"Token-weighted distillation: ENABLED (mode={args.token_weight_mode}, "
+                     f"epsilon={args.token_weight_epsilon}, span={args.token_weight_span}, "
+                     f"mid={args.token_weight_mid}, "
+                     f"pre_span={args.token_weight_pre_span} x {args.token_weight_pre_span_tokens} tokens)")
+
     train_dataset = prepare_distil_dataset(
         raw_dataset,
         prompt_key=args.prompt_key,
@@ -399,6 +432,14 @@ if __name__ == "__main__":
         "gate_mode": args.gate_mode,
         "gate_max_regen_rounds": args.gate_max_regen_rounds,
         "gate_require_diff_answer": args.gate_require_diff_answer,
+
+        # Token-weighted distillation settings (token-weighted contrastive OPSD)
+        "token_weight_mode": args.token_weight_mode,
+        "token_weight_epsilon": args.token_weight_epsilon,
+        "token_weight_span": args.token_weight_span,
+        "token_weight_pre_span": args.token_weight_pre_span,
+        "token_weight_pre_span_tokens": args.token_weight_pre_span_tokens,
+        "token_weight_mid": args.token_weight_mid,
 
         # Critique-conditioned self-teaching settings
         "use_critique": args.use_critique,

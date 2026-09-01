@@ -2384,6 +2384,66 @@ class DistilTrainer(BaseTrainer):
             if sampling_per_token_logps is not None:
                 sampling_per_token_logps = sampling_per_token_logps[:, :loss_tokens]
 
+        # Token-weighted contrastive OPSD: per-token loss weights concentrated
+        # where the pair-specific correctness signal was measured, instead of
+        # uniformly over the trace, where ~99% of the gradient is
+        # pair-conditioned style KL. Two profiles:
+        #   'boxed_hybrid'     -- span / pre-span window / epsilon around the
+        #                         final \boxed{...} slot, where the signal is
+        #                         +0.84-0.92 nats, 27-29 sigma
+        #                         (rl/eval_sparse_signal.py).
+        #   'numeric-skeleton' -- token_weight_span on the boxed span,
+        #                         token_weight_mid on the result token(s) of
+        #                         EVERY intermediate "a op b = c" statement
+        #                         (at the first FALSE one the pair boosts the
+        #                         true result +1.39 nats, 31 sigma;
+        #                         rl/eval_midtrace_slip.py), epsilon elsewhere.
+        #                         Boxed-span weight wins where the two overlap.
+        # Rollouts with no boxed span get all-zero weight and drop out of the
+        # loss the same way gate failures do -- falling back to uniform there
+        # would silently reintroduce exactly the style distillation these modes
+        # remove. Runs AFTER gate regeneration (completion_ids_list is final)
+        # and after the loss-window truncation (indices are clipped to the loss
+        # width, though train.py forbids combining the two).
+        token_loss_weights = None
+        _twm = getattr(self.args, "token_weight_mode", "none")
+        if _twm in ("boxed_hybrid", "numeric-skeleton") and mode == "train":
+            weight_width = completion_ids.size(1)
+            w_rows, n_no_span = [], 0
+            for ids in completion_ids_list:
+                if _twm == "numeric-skeleton":
+                    row = numeric_skeleton_weights(
+                        list(ids), self.processing_class.decode,
+                        float(self.args.token_weight_epsilon),
+                        float(self.args.token_weight_mid),
+                        float(self.args.token_weight_span),
+                    )
+                    if row is None:
+                        w = torch.zeros(weight_width, device=device)
+                        n_no_span += 1
+                    else:
+                        w = torch.full((weight_width,), float(self.args.token_weight_epsilon), device=device)
+                        n = min(len(row), weight_width)
+                        w[:n] = torch.tensor(row[:n], dtype=w.dtype, device=device)
+                else:  # boxed_hybrid
+                    w = torch.full((weight_width,), float(self.args.token_weight_epsilon), device=device)
+                    span = locate_boxed_span(list(ids), self.processing_class.decode)
+                    if span is None:
+                        w.zero_()
+                        n_no_span += 1
+                    else:
+                        s, e = min(span[0], weight_width), min(span[1], weight_width)
+                        k = int(self.args.token_weight_pre_span_tokens)
+                        if k > 0:
+                            w[max(0, s - k):s] = float(self.args.token_weight_pre_span)
+                        w[s:e] = float(self.args.token_weight_span)
+                w_rows.append(w)
+            token_loss_weights = torch.stack(w_rows)
+            agg_no_span = self.accelerator.gather(
+                torch.tensor(n_no_span / max(len(completion_ids_list), 1), device=device)
+            )
+            self._metrics[mode]["weights/no_span_fraction"].append(agg_no_span.mean().item())
+
         # Concatenate prompt_mask with completion_mask for logit computation
         prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)  # (B, P+C)
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B, P+C)
@@ -2542,6 +2602,8 @@ class DistilTrainer(BaseTrainer):
             output["old_per_token_logps"] = old_per_token_logps
         if importance_sampling_ratio is not None:
             output["importance_sampling_ratio"] = importance_sampling_ratio
+        if token_loss_weights is not None:
+            output["token_loss_weights"] = token_loss_weights
         if ref_per_token_logps is not None:
             output["ref_per_token_logps"] = ref_per_token_logps
         if "pixel_values" in forward_kwargs:
@@ -2648,12 +2710,24 @@ class DistilTrainer(BaseTrainer):
         if entropy_mask is not None:
             per_token_loss = per_token_loss * entropy_mask
 
-        per_seq_loss = (per_token_loss * loss_completion_mask).sum(-1) / loss_completion_mask.sum(-1).clamp(min=1.0)
+        # Token-weighted path: weight-normalized mean per rollout, so every rollout
+        # contributes at the same scale regardless of trace length or weight
+        # profile (per-rollout weight sum is normalized away). Rows whose combined
+        # weights are all zero (no boxed span, or killed by the gate/truncation
+        # masks) drop out of the row average below. The default path is unchanged
+        # from the pre-patch behaviour.
+        token_loss_weights = inputs.get("token_loss_weights")
+        if token_loss_weights is not None:
+            loss_weights = loss_completion_mask * token_loss_weights
+            per_seq_loss = (per_token_loss * loss_weights).sum(-1) / loss_weights.sum(-1).clamp(min=1e-6)
+            live_rows = (loss_weights.sum(-1) > 0).float()
+        else:
+            per_seq_loss = (per_token_loss * loss_completion_mask).sum(-1) / loss_completion_mask.sum(-1).clamp(min=1.0)
+            live_rows = (loss_completion_mask.sum(-1) > 0).float()
         if self.args.gate_mode == "wrong_only":
             # Average over live (non-zero-mask) rows only, so gated-out rows do not
             # dilute the step: each step is a mean over the same effective batch of
             # gated rollouts regardless of how many rows the gate killed.
-            live_rows = (loss_completion_mask.sum(-1) > 0).float()
             loss = (per_seq_loss * live_rows).sum() / live_rows.sum().clamp(min=1.0)
         else:
             loss = per_seq_loss.mean()
@@ -2746,6 +2820,158 @@ class DistilTrainer(BaseTrainer):
             model_name = self.args.hub_model_id.split("/")[-1]
         self.create_model_card(model_name=model_name)
         super()._save_checkpoint(model, trial)
+
+
+def locate_boxed_span(ids, decode):
+    """Token-space span of the LAST ``\\boxed{...}`` in a completion, or None.
+
+    Pure function: ``ids`` is a list of token ids, ``decode`` is any callable
+    mapping a list of token ids to text (e.g. ``tokenizer.decode``). Returns a
+    half-open token interval ``(start, end)`` covering the opener ``\\boxed{``
+    through the matching closing brace (clipped to the end of ``ids`` when the
+    box is unclosed, i.e. the trace was truncated mid-box).
+
+    The char->token mapping is a binary search over prefix-decode lengths, so
+    it is tokenizer-agnostic (no assumption about how ``\\boxed{`` splits into
+    tokens). ``len(decode(ids[:t]))`` is nondecreasing in ``t``; a token
+    boundary that splits a multi-byte char can perturb the boundary by a token,
+    which is harmless here because the span content is ASCII math.
+
+    Tests (run with ``python -m doctest opsd/trainer.py``); the toy decode
+    treats each character as one token, which makes token indices char indices:
+
+    >>> dec = lambda ids: "".join(ids)
+    >>> span = locate_boxed_span(list("x = \\\\boxed{42}."), dec)
+    >>> span, "".join(list("x = \\\\boxed{42}.")[span[0]:span[1]])
+    ((4, 14), '\\\\boxed{42}')
+    >>> s = list("\\\\boxed{\\\\frac{1}{2}}!")     # nested braces -> outer close
+    >>> span = locate_boxed_span(s, dec); span, "".join(s[span[0]:span[1]])
+    ((0, 19), '\\\\boxed{\\\\frac{1}{2}}')
+    >>> s = list("\\\\boxed{1} or \\\\boxed{2}")   # multiple boxes -> last one
+    >>> span = locate_boxed_span(s, dec); "".join(s[span[0]:span[1]])
+    '\\\\boxed{2}'
+    >>> locate_boxed_span(list("no box here"), dec) is None
+    True
+    >>> locate_boxed_span(list("\\\\boxed{12"), dec)  # unclosed -> clip to end
+    (0, 9)
+    """
+    text = decode(ids)
+    i = text.rfind("\\boxed{")
+    if i == -1:
+        return None
+    depth, j = 1, i + len("\\boxed{")
+    while j < len(text) and depth:
+        depth += (text[j] == "{") - (text[j] == "}")
+        j += 1
+
+    def tok_at(char_idx):
+        # smallest t with len(decode(ids[:t])) > char_idx; that prefix's last
+        # token (t - 1) is the token containing char_idx
+        lo, hi = 1, len(ids)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if len(decode(ids[:mid])) > char_idx:
+                hi = mid
+            else:
+                lo = mid + 1
+        return lo - 1
+
+    return tok_at(i), tok_at(j - 1) + 1
+
+
+# The same regex family as rl/eval_midtrace_slip.py::EQ_RE -- an intermediate
+# arithmetic statement "a op b = c"; group 4 is the stated result c.
+_NUMERIC_RESULT_RE = re.compile(r"(\d+)\s*([-+*/×÷x])\s*(\d+)\s*=\s*(-?\d+)")
+
+
+def locate_result_spans(ids, decode):
+    """Token-space spans of the stated RESULT of every intermediate
+    arithmetic statement ``a op b = c`` in a completion -- the group-4 span
+    of ``_NUMERIC_RESULT_RE`` (same regex family as
+    ``rl/eval_midtrace_slip.py::EQ_RE``).
+
+    Pure function with the same contract as :func:`locate_boxed_span`:
+    ``ids`` is a list of token ids, ``decode`` is any callable mapping a list
+    of token ids to text. Returns a list of half-open token intervals in
+    trace order. ALL results are located, true and false alike -- locating
+    truth at training time would be free (each statement is self-contained
+    arithmetic), but weighting true results as well also reinforces
+    correct-arithmetic conditionals; a false-results-only variant is a
+    flagged alternative (see rl/proposals/token_weighted_opsd.md), not
+    implemented here.
+
+    Tests (module-level relative imports mean ``python -m doctest`` on the
+    file fails; run ``python -c "import doctest, opsd.trainer as t;
+    print(doctest.testmod(t))"`` from the repo root instead); the toy decode
+    treats each character as one token, making token indices char indices:
+
+    >>> dec = lambda ids: "".join(ids)
+    >>> s = list("2 + 3 = 5, then 5 * 4 = 21.")   # multiple equations; a TRUE
+    >>> [ "".join(s[a:b]) for a, b in locate_result_spans(s, dec) ]  # and a FALSE result
+    ['5', '21']
+    >>> s = list("7 × 6 = 42 and 84 ÷ 2 = 42")    # unicode operators
+    >>> [ "".join(s[a:b]) for a, b in locate_result_spans(s, dec) ]
+    ['42', '42']
+    >>> s = list("5 - 8 = -3, negative")           # signed result
+    >>> [ "".join(s[a:b]) for a, b in locate_result_spans(s, dec) ]
+    ['-3']
+    >>> locate_result_spans(list("no arithmetic here"), dec)
+    []
+    """
+    text = decode(ids)
+
+    def tok_at(char_idx):
+        # smallest t with len(decode(ids[:t])) > char_idx; that prefix's last
+        # token (t - 1) is the token containing char_idx
+        lo, hi = 1, len(ids)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if len(decode(ids[:mid])) > char_idx:
+                hi = mid
+            else:
+                lo = mid + 1
+        return lo - 1
+
+    return [
+        (tok_at(m.start(4)), tok_at(m.end(4) - 1) + 1)
+        for m in _NUMERIC_RESULT_RE.finditer(text)
+    ]
+
+
+def numeric_skeleton_weights(ids, decode, eps, w_mid, w_span):
+    """Per-token loss weights for ``token_weight_mode='numeric-skeleton'``:
+    ``w_span`` on the completion's last ``\\boxed{...}`` span, ``w_mid`` on
+    every intermediate computation-result token (:func:`locate_result_spans`),
+    ``eps`` elsewhere. Returns a list of ``len(ids)`` floats, or ``None`` when
+    the completion has no boxed span (the caller drops the rollout -- the
+    same no-span semantics as 'boxed_hybrid').
+
+    The boxed-span weight is applied LAST, so it wins wherever a result span
+    overlaps the box (e.g. an equation restated inside ``\\boxed{...}``):
+
+    >>> dec = lambda ids: "".join(ids)
+    >>> s = list("3 * 4 = 13, no: 3 * 4 = 12. \\\\boxed{3 * 4 = 12}")
+    >>> w = numeric_skeleton_weights(s, dec, 0.001, 0.2, 1.0)
+    >>> "".join(c for c, x in zip(s, w) if x == 0.2)  # mid-weight results: the
+    '1312'
+    >>> a, b = locate_boxed_span(s, dec)              # false 13, the true 12; NOT
+    >>> set(w[a:b])                                   # the 12 inside the box --
+    {1.0}
+    >>> (w[0], len(w) == len(s))                      # boxed-span weight wins there
+    (0.001, True)
+    >>> numeric_skeleton_weights(list("2 + 2 = 4, no box"), dec, 0.001, 0.2, 1.0) is None
+    True
+    """
+    span = locate_boxed_span(ids, decode)
+    if span is None:
+        return None
+    w = [float(eps)] * len(ids)
+    for a, b in locate_result_spans(ids, decode):
+        for t in range(a, min(b, len(ids))):
+            w[t] = float(w_mid)
+    for t in range(span[0], min(span[1], len(ids))):
+        w[t] = float(w_span)
+    return w
 
 
 def prepare_distil_dataset(

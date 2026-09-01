@@ -772,6 +772,70 @@ class DistilConfig(TrainingArguments):
         },
     )
 
+    # Parameters that control token-weighted distillation (token-weighted contrastive OPSD)
+    token_weight_mode: str = field(
+        default="none",
+        metadata={
+            "help": "'none' (default, exact pre-patch behaviour), 'boxed_hybrid', or 'numeric-skeleton'. When "
+            "'boxed_hybrid', the per-token JSD is reweighted per rollout: token_weight_span on the tokens of the "
+            "rollout's LAST \\boxed{...} span, token_weight_pre_span on the token_weight_pre_span_tokens tokens "
+            "preceding it, and token_weight_epsilon elsewhere. When 'numeric-skeleton' (recommended), the weights "
+            "are token_weight_span on the boxed span, token_weight_mid on the result token(s) of EVERY "
+            "intermediate arithmetic statement 'a op b = c' in the trace (the group-4 span of the "
+            "rl/eval_midtrace_slip.py EQ_RE regex family), and token_weight_epsilon elsewhere; the boxed-span "
+            "weight wins where the two overlap. The per-rollout loss is the weight-normalized mean, so every "
+            "rollout contributes at the same scale regardless of trace length or weight profile. Rollouts with "
+            "no boxed span get all-zero weight (dropped from the loss exactly like gate failures) and are "
+            "counted in the weights/no_span_fraction metric. Motivated by the 2026-08-30 measurements: the "
+            "pair-specific correctness signal at the wrong trace's own answer slot is +0.84-0.92 nats (27-29 "
+            "sigma, ~91% positive; rl/eval_sparse_signal.py), and at the first FALSE mid-trace arithmetic "
+            "statement the pair boosts the TRUE result +1.39 nats (31 sigma, 92.5% positive; "
+            "rl/eval_midtrace_slip.py) -- while uniform weighting buries both under pair-conditioned style KL "
+            "spread over the trace (~100:1). Requires loss_max_completion_tokens=0: the boxed span sits at the "
+            "trace END (median ~10.9k tokens on the Arm-1 data), so a first-N loss window would silently "
+            "truncate it out of the loss."
+        },
+    )
+    token_weight_epsilon: float = field(
+        default=0.001,
+        metadata={
+            "help": "Weight on tokens outside all weighted spans. 0 disables off-span distillation entirely; "
+            "small positive values keep a bounded amount of the paper's full-trace distillation as a hedge. "
+            "Active in both 'boxed_hybrid' and 'numeric-skeleton' modes."
+        },
+    )
+    token_weight_span: float = field(
+        default=1.0,
+        metadata={
+            "help": "Weight on the tokens of the rollout's last \\boxed{...} span (opener through matching "
+            "closing brace). Active in both 'boxed_hybrid' and 'numeric-skeleton' modes; wins over "
+            "token_weight_mid where a result span overlaps the box."
+        },
+    )
+    token_weight_mid: float = field(
+        default=0.2,
+        metadata={
+            "help": "Weight on every intermediate computation-result token -- the stated result c in any "
+            "'a op b = c' statement in the trace (true or false; weighting true results too also reinforces "
+            "correct-arithmetic conditionals). Only active when token_weight_mode='numeric-skeleton'."
+        },
+    )
+    token_weight_pre_span: float = field(
+        default=0.05,
+        metadata={
+            "help": "Weight on the token_weight_pre_span_tokens tokens immediately before the boxed span (the "
+            "final-answer-statement region). Only active when token_weight_mode='boxed_hybrid'."
+        },
+    )
+    token_weight_pre_span_tokens: int = field(
+        default=256,
+        metadata={
+            "help": "Length in tokens of the moderate-weight window before the boxed span. 0 reduces "
+            "'boxed_hybrid' to the pure hard-window profile (a). Only active when "
+            "token_weight_mode='boxed_hybrid'."
+        },
+    )
+
     # Parameters that control critique-conditioned self-teaching
     use_critique: bool = field(
         default=False,
