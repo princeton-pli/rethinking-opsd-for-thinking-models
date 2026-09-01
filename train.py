@@ -144,11 +144,14 @@ def parse_args():
     parser.add_argument("--gate_wrong_answer_key", type=str, default=None,
                         help="Dataset column holding the in-context wrong answer used for gate grading")
     parser.add_argument("--token_weight_mode", type=str, default="none",
-                        choices=["none", "boxed_hybrid", "numeric-skeleton"],
+                        choices=["none", "boxed_hybrid", "numeric-skeleton", "tail-window", "uniform"],
                         help="'boxed_hybrid': reweight the per-token JSD toward the rollout's last \\boxed{...} "
                              "span. 'numeric-skeleton' (recommended): boxed span at token_weight_span plus every "
-                             "intermediate 'a op b = c' result token at token_weight_mid (see "
-                             "DistilConfig.token_weight_mode). Default 'none' = pre-patch behaviour.")
+                             "intermediate 'a op b = c' result token at token_weight_mid. 'tail-window': 1.0 on "
+                             "the last token_weight_tail_tokens tokens, epsilon before (no locator; the most "
+                             "generalizable baseline arm). 'uniform': explicit all-ones control through the "
+                             "weighted path, distinct from 'none' (see DistilConfig.token_weight_mode). "
+                             "Default 'none' = pre-patch behaviour.")
     parser.add_argument("--token_weight_epsilon", type=float, default=0.001,
                         help="Weight on tokens outside the boxed span and pre-span window")
     parser.add_argument("--token_weight_span", type=float, default=1.0,
@@ -157,6 +160,9 @@ def parse_args():
                         help="Weight on the window of tokens immediately before the boxed span")
     parser.add_argument("--token_weight_pre_span_tokens", type=int, default=256,
                         help="Length in tokens of the pre-span window (0 = pure hard window)")
+    parser.add_argument("--token_weight_tail_tokens", type=int, default=4096,
+                        help="Length in tokens of the uniform-1.0 window at the END of each rollout "
+                             "(tail-window mode only; shorter rollouts get all-ones)")
     parser.add_argument("--token_weight_mid", type=float, default=0.2,
                         help="Weight on every intermediate 'a op b = c' result token "
                              "(numeric-skeleton mode only)")
@@ -355,7 +361,7 @@ if __name__ == "__main__":
             "token_weight_mode is untested with speculative/splice/teacher generation"
         logging.info(f"Token-weighted distillation: ENABLED (mode={args.token_weight_mode}, "
                      f"epsilon={args.token_weight_epsilon}, span={args.token_weight_span}, "
-                     f"mid={args.token_weight_mid}, "
+                     f"mid={args.token_weight_mid}, tail={args.token_weight_tail_tokens}, "
                      f"pre_span={args.token_weight_pre_span} x {args.token_weight_pre_span_tokens} tokens)")
 
     train_dataset = prepare_distil_dataset(
@@ -440,6 +446,7 @@ if __name__ == "__main__":
         "token_weight_pre_span": args.token_weight_pre_span,
         "token_weight_pre_span_tokens": args.token_weight_pre_span_tokens,
         "token_weight_mid": args.token_weight_mid,
+        "token_weight_tail_tokens": args.token_weight_tail_tokens,
 
         # Critique-conditioned self-teaching settings
         "use_critique": args.use_critique,

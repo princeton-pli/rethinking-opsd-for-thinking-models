@@ -776,7 +776,8 @@ class DistilConfig(TrainingArguments):
     token_weight_mode: str = field(
         default="none",
         metadata={
-            "help": "'none' (default, exact pre-patch behaviour), 'boxed_hybrid', or 'numeric-skeleton'. When "
+            "help": "'none' (default, exact pre-patch behaviour), 'boxed_hybrid', 'numeric-skeleton', "
+            "'tail-window', or 'uniform'. When "
             "'boxed_hybrid', the per-token JSD is reweighted per rollout: token_weight_span on the tokens of the "
             "rollout's LAST \\boxed{...} span, token_weight_pre_span on the token_weight_pre_span_tokens tokens "
             "preceding it, and token_weight_epsilon elsewhere. When 'numeric-skeleton' (recommended), the weights "
@@ -791,17 +792,34 @@ class DistilConfig(TrainingArguments):
             "sigma, ~91% positive; rl/eval_sparse_signal.py), and at the first FALSE mid-trace arithmetic "
             "statement the pair boosts the TRUE result +1.39 nats (31 sigma, 92.5% positive; "
             "rl/eval_midtrace_slip.py) -- while uniform weighting buries both under pair-conditioned style KL "
-            "spread over the trace (~100:1). Requires loss_max_completion_tokens=0: the boxed span sits at the "
+            "spread over the trace (~100:1). When 'tail-window' (the most generalizable baseline arm: no "
+            "locator, no regex, references tolerated), the weights are 1.0 on the LAST token_weight_tail_tokens "
+            "tokens of each rollout and token_weight_epsilon before them -- the answer region of a terminated "
+            "trace lives at the end, so a tail window covers it without any span detection; rollouts shorter "
+            "than the tail get all-ones (never dropped). When 'uniform', every completion token gets weight 1.0 "
+            "-- an explicit all-ones control arm, distinct from 'none': 'none' skips the weighting path "
+            "entirely (pre-patch reduction), while 'uniform' exercises the same weighted code path, "
+            "weight-normalized-mean reduction, and full-loss-window requirement as the other modes, isolating "
+            "the effect of the weight PROFILE from the effect of the weighting machinery itself. Requires "
+            "loss_max_completion_tokens=0 in every non-'none' mode: the boxed span / trace tail sits at the "
             "trace END (median ~10.9k tokens on the Arm-1 data), so a first-N loss window would silently "
             "truncate it out of the loss."
+        },
+    )
+    token_weight_tail_tokens: int = field(
+        default=4096,
+        metadata={
+            "help": "Length in tokens of the uniform-1.0 window at the END of each rollout. Rollouts shorter "
+            "than this get weight 1.0 everywhere. Only active when token_weight_mode='tail-window'."
         },
     )
     token_weight_epsilon: float = field(
         default=0.001,
         metadata={
-            "help": "Weight on tokens outside all weighted spans. 0 disables off-span distillation entirely; "
-            "small positive values keep a bounded amount of the paper's full-trace distillation as a hedge. "
-            "Active in both 'boxed_hybrid' and 'numeric-skeleton' modes."
+            "help": "Weight on tokens outside all weighted spans (for 'tail-window': on tokens before the tail "
+            "window). 0 disables off-span distillation entirely; small positive values keep a bounded amount "
+            "of the paper's full-trace distillation as a hedge. Active in 'boxed_hybrid', 'numeric-skeleton', "
+            "and 'tail-window' modes; ignored by 'uniform'."
         },
     )
     token_weight_span: float = field(

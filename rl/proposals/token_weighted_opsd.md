@@ -1,5 +1,46 @@
 # Token-weighted contrastive-OPSD — design note
 
+## REV 3 ADDENDUM (2026-08-31, opsd-arms branch)
+
+Rev 3 = rev 2 + two weight modes for the arm ladder, APPLIED on branch
+`opsd-arms` (rev 2's "nothing applied" status line no longer holds there;
+`contrastive-opsd` itself remains untouched). The companion patch file is
+regenerated from the applied diff and applies cleanly at `contrastive-opsd`
+HEAD (`c323e04`).
+
+New modes (both default-off; rev-2 modes unchanged):
+
+- **`tail-window`** — weight 1.0 on the LAST `token_weight_tail_tokens`
+  tokens of each rollout (new config field, default 4096), `token_weight_epsilon`
+  before them. No locator, no regex, no boxed-span requirement: rollouts
+  shorter than the tail get all-ones and are never dropped. This is the
+  most generalizable baseline arm (Sanjeev's design thread (ii),
+  HANDOFF_2026-08-30): it answers the numeric-skeleton generalizability
+  objection by weighting position, not content, and tolerates references.
+  At the measured medians (10.2k-token traces, 4096-tail) the tail carries
+  ~99.85% of the weight mass and covers the boxed span by construction in
+  every terminated trace.
+- **`uniform`** — all-ones, as an EXPLICIT arm. Distinct from mode `none`,
+  which disables the weighting path entirely: `uniform` runs the weighted
+  code path (weight-normalized mean, `clamp(min=1e-6)` denominator,
+  live-row bookkeeping, mandatory full loss window), so uniform-vs-tail
+  isolates the weight *profile* while none-vs-uniform isolates the
+  *machinery* (expected ≈ no-op difference; cheap sanity arm). Note
+  `uniform` at full window is NOT Arm 1: Arm 1's loss covered only the
+  first 4096 tokens.
+
+Implementation: pure doctested helpers `tail_window_weights` /
+`uniform_weights` next to the rev-2 locators (10 new doctest examples;
+the tensor path fills all-ones directly for `uniform` and the helper is
+the executable spec). `train.py` gains `--token_weight_tail_tokens` and the
+two new mode choices; the `loss_max_completion_tokens == 0` hard assert
+covers all four modes (the tail, like the boxed span, lives at the trace
+end). `weights/no_span_fraction` is logged only by the two boxed modes.
+
+Everything below this line is rev 2, unchanged.
+
+---
+
 Status: PROPOSAL, rev 2, 2026-08-30. Nothing applied, nothing committed,
 nothing run. Rev 2 replaces the recommended profile: **numeric-skeleton**
 (boxed span + every intermediate computation-result token), superseding the

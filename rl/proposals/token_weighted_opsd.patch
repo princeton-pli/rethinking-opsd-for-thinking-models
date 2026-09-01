@@ -1,8 +1,8 @@
-new file mode 100644
-Binary files /dev/null and b/b/opsd/__pycache__/trainer.cpython-314.pyc differ
+diff --git a/opsd/config.py b/opsd/config.py
+index ce103f9..7af0a31 100644
 --- a/opsd/config.py
 +++ b/opsd/config.py
-@@ -772,6 +772,70 @@ class DistilConfig(TrainingArguments):
+@@ -772,6 +772,88 @@ class DistilConfig(TrainingArguments):
          },
      )
  
@@ -10,7 +10,8 @@ Binary files /dev/null and b/b/opsd/__pycache__/trainer.cpython-314.pyc differ
 +    token_weight_mode: str = field(
 +        default="none",
 +        metadata={
-+            "help": "'none' (default, exact pre-patch behaviour), 'boxed_hybrid', or 'numeric-skeleton'. When "
++            "help": "'none' (default, exact pre-patch behaviour), 'boxed_hybrid', 'numeric-skeleton', "
++            "'tail-window', or 'uniform'. When "
 +            "'boxed_hybrid', the per-token JSD is reweighted per rollout: token_weight_span on the tokens of the "
 +            "rollout's LAST \\boxed{...} span, token_weight_pre_span on the token_weight_pre_span_tokens tokens "
 +            "preceding it, and token_weight_epsilon elsewhere. When 'numeric-skeleton' (recommended), the weights "
@@ -25,17 +26,34 @@ Binary files /dev/null and b/b/opsd/__pycache__/trainer.cpython-314.pyc differ
 +            "sigma, ~91% positive; rl/eval_sparse_signal.py), and at the first FALSE mid-trace arithmetic "
 +            "statement the pair boosts the TRUE result +1.39 nats (31 sigma, 92.5% positive; "
 +            "rl/eval_midtrace_slip.py) -- while uniform weighting buries both under pair-conditioned style KL "
-+            "spread over the trace (~100:1). Requires loss_max_completion_tokens=0: the boxed span sits at the "
++            "spread over the trace (~100:1). When 'tail-window' (the most generalizable baseline arm: no "
++            "locator, no regex, references tolerated), the weights are 1.0 on the LAST token_weight_tail_tokens "
++            "tokens of each rollout and token_weight_epsilon before them -- the answer region of a terminated "
++            "trace lives at the end, so a tail window covers it without any span detection; rollouts shorter "
++            "than the tail get all-ones (never dropped). When 'uniform', every completion token gets weight 1.0 "
++            "-- an explicit all-ones control arm, distinct from 'none': 'none' skips the weighting path "
++            "entirely (pre-patch reduction), while 'uniform' exercises the same weighted code path, "
++            "weight-normalized-mean reduction, and full-loss-window requirement as the other modes, isolating "
++            "the effect of the weight PROFILE from the effect of the weighting machinery itself. Requires "
++            "loss_max_completion_tokens=0 in every non-'none' mode: the boxed span / trace tail sits at the "
 +            "trace END (median ~10.9k tokens on the Arm-1 data), so a first-N loss window would silently "
 +            "truncate it out of the loss."
++        },
++    )
++    token_weight_tail_tokens: int = field(
++        default=4096,
++        metadata={
++            "help": "Length in tokens of the uniform-1.0 window at the END of each rollout. Rollouts shorter "
++            "than this get weight 1.0 everywhere. Only active when token_weight_mode='tail-window'."
 +        },
 +    )
 +    token_weight_epsilon: float = field(
 +        default=0.001,
 +        metadata={
-+            "help": "Weight on tokens outside all weighted spans. 0 disables off-span distillation entirely; "
-+            "small positive values keep a bounded amount of the paper's full-trace distillation as a hedge. "
-+            "Active in both 'boxed_hybrid' and 'numeric-skeleton' modes."
++            "help": "Weight on tokens outside all weighted spans (for 'tail-window': on tokens before the tail "
++            "window). 0 disables off-span distillation entirely; small positive values keep a bounded amount "
++            "of the paper's full-trace distillation as a hedge. Active in 'boxed_hybrid', 'numeric-skeleton', "
++            "and 'tail-window' modes; ignored by 'uniform'."
 +        },
 +    )
 +    token_weight_span: float = field(
@@ -73,9 +91,11 @@ Binary files /dev/null and b/b/opsd/__pycache__/trainer.cpython-314.pyc differ
      # Parameters that control critique-conditioned self-teaching
      use_critique: bool = field(
          default=False,
+diff --git a/opsd/trainer.py b/opsd/trainer.py
+index 2689dcf..24b506d 100644
 --- a/opsd/trainer.py
 +++ b/opsd/trainer.py
-@@ -2384,6 +2384,66 @@ class DistilTrainer(BaseTrainer):
+@@ -2384,6 +2384,94 @@ class DistilTrainer(BaseTrainer):
              if sampling_per_token_logps is not None:
                  sampling_per_token_logps = sampling_per_token_logps[:, :loss_tokens]
  
@@ -94,19 +114,42 @@ Binary files /dev/null and b/b/opsd/__pycache__/trainer.cpython-314.pyc differ
 +        #                         true result +1.39 nats, 31 sigma;
 +        #                         rl/eval_midtrace_slip.py), epsilon elsewhere.
 +        #                         Boxed-span weight wins where the two overlap.
-+        # Rollouts with no boxed span get all-zero weight and drop out of the
-+        # loss the same way gate failures do -- falling back to uniform there
-+        # would silently reintroduce exactly the style distillation these modes
-+        # remove. Runs AFTER gate regeneration (completion_ids_list is final)
-+        # and after the loss-window truncation (indices are clipped to the loss
-+        # width, though train.py forbids combining the two).
++        #   'tail-window'      -- 1.0 on the LAST token_weight_tail_tokens
++        #                         tokens of each rollout, epsilon before them.
++        #                         No locator, no regex: the most generalizable
++        #                         baseline arm (references tolerated).
++        #   'uniform'          -- all-ones. Explicit control arm exercising the
++        #                         weighted code path (weight-normalized mean,
++        #                         full loss window); distinct from 'none',
++        #                         which skips this path entirely.
++        # Rollouts with no boxed span (boxed modes only) get all-zero weight
++        # and drop out of the loss the same way gate failures do -- falling
++        # back to uniform there would silently reintroduce exactly the style
++        # distillation those modes remove. 'tail-window' and 'uniform' never
++        # drop rows. Runs AFTER gate regeneration (completion_ids_list is
++        # final) and after the loss-window truncation (indices are clipped to
++        # the loss width, though train.py forbids combining the two).
 +        token_loss_weights = None
 +        _twm = getattr(self.args, "token_weight_mode", "none")
-+        if _twm in ("boxed_hybrid", "numeric-skeleton") and mode == "train":
++        if _twm in ("boxed_hybrid", "numeric-skeleton", "tail-window", "uniform") and mode == "train":
 +            weight_width = completion_ids.size(1)
 +            w_rows, n_no_span = [], 0
 +            for ids in completion_ids_list:
-+                if _twm == "numeric-skeleton":
++                if _twm == "uniform":
++                    # All-ones (see uniform_weights for the doctested per-row
++                    # spec). Padding positions beyond the row's real length are
++                    # killed by loss_completion_mask; 1.0 there is inert.
++                    w = torch.ones(weight_width, device=device)
++                elif _twm == "tail-window":
++                    row = tail_window_weights(
++                        min(len(ids), weight_width),
++                        float(self.args.token_weight_epsilon),
++                        int(self.args.token_weight_tail_tokens),
++                    )
++                    w = torch.full((weight_width,), float(self.args.token_weight_epsilon), device=device)
++                    if row:
++                        w[:len(row)] = torch.tensor(row, dtype=w.dtype, device=device)
++                elif _twm == "numeric-skeleton":
 +                    row = numeric_skeleton_weights(
 +                        list(ids), self.processing_class.decode,
 +                        float(self.args.token_weight_epsilon),
@@ -134,15 +177,20 @@ Binary files /dev/null and b/b/opsd/__pycache__/trainer.cpython-314.pyc differ
 +                        w[s:e] = float(self.args.token_weight_span)
 +                w_rows.append(w)
 +            token_loss_weights = torch.stack(w_rows)
-+            agg_no_span = self.accelerator.gather(
-+                torch.tensor(n_no_span / max(len(completion_ids_list), 1), device=device)
-+            )
-+            self._metrics[mode]["weights/no_span_fraction"].append(agg_no_span.mean().item())
++            if _twm in ("boxed_hybrid", "numeric-skeleton"):
++                # 'tail-window'/'uniform' have no span concept and never drop
++                # rows; logging a constant 0 would only invite misreading. The
++                # gather stays symmetric across ranks because the mode is a
++                # global config value.
++                agg_no_span = self.accelerator.gather(
++                    torch.tensor(n_no_span / max(len(completion_ids_list), 1), device=device)
++                )
++                self._metrics[mode]["weights/no_span_fraction"].append(agg_no_span.mean().item())
 +
          # Concatenate prompt_mask with completion_mask for logit computation
          prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)  # (B, P+C)
          attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B, P+C)
-@@ -2542,6 +2602,8 @@ class DistilTrainer(BaseTrainer):
+@@ -2542,6 +2630,8 @@ class DistilTrainer(BaseTrainer):
              output["old_per_token_logps"] = old_per_token_logps
          if importance_sampling_ratio is not None:
              output["importance_sampling_ratio"] = importance_sampling_ratio
@@ -151,7 +199,7 @@ Binary files /dev/null and b/b/opsd/__pycache__/trainer.cpython-314.pyc differ
          if ref_per_token_logps is not None:
              output["ref_per_token_logps"] = ref_per_token_logps
          if "pixel_values" in forward_kwargs:
-@@ -2648,12 +2710,24 @@ class DistilTrainer(BaseTrainer):
+@@ -2648,12 +2738,24 @@ class DistilTrainer(BaseTrainer):
          if entropy_mask is not None:
              per_token_loss = per_token_loss * entropy_mask
  
@@ -178,7 +226,7 @@ Binary files /dev/null and b/b/opsd/__pycache__/trainer.cpython-314.pyc differ
              loss = (per_seq_loss * live_rows).sum() / live_rows.sum().clamp(min=1.0)
          else:
              loss = per_seq_loss.mean()
-@@ -2748,6 +2822,158 @@ class DistilTrainer(BaseTrainer):
+@@ -2748,6 +2850,205 @@ class DistilTrainer(BaseTrainer):
          super()._save_checkpoint(model, trial)
  
  
@@ -334,21 +382,73 @@ Binary files /dev/null and b/b/opsd/__pycache__/trainer.cpython-314.pyc differ
 +    return w
 +
 +
++def tail_window_weights(n_tokens, eps, tail):
++    """Per-token loss weights for ``token_weight_mode='tail-window'``: 1.0 on
++    the LAST ``tail`` tokens of the completion, ``eps`` before them. Pure
++    function over the row's real (unpadded) token count -- no token ids, no
++    decode, no locator: the answer region of a terminated trace lives at the
++    end, so a fixed tail window covers it without any span detection. Rollouts
++    shorter than ``tail`` get all-ones (never dropped -- there is no no-span
++    semantics in this mode). Returns a list of ``n_tokens`` floats.
++
++    >>> tail_window_weights(6, 0.001, 4)
++    [0.001, 0.001, 1.0, 1.0, 1.0, 1.0]
++    >>> tail_window_weights(3, 0.001, 4)   # shorter than the tail -> all-ones
++    [1.0, 1.0, 1.0]
++    >>> tail_window_weights(4, 0.001, 4)   # exactly the tail -> all-ones
++    [1.0, 1.0, 1.0, 1.0]
++    >>> tail_window_weights(2, 0.5, 0)     # tail 0 -> epsilon everywhere
++    [0.5, 0.5]
++    >>> tail_window_weights(0, 0.001, 4)   # empty completion
++    []
++    """
++    n_tokens, tail = int(n_tokens), int(tail)
++    cut = max(0, n_tokens - tail)
++    return [float(eps)] * cut + [1.0] * (n_tokens - cut)
++
++
++def uniform_weights(n_tokens):
++    """Per-token loss weights for ``token_weight_mode='uniform'``: 1.0 on
++    every completion token. This is an EXPLICIT all-ones arm, distinct from
++    ``token_weight_mode='none'``: 'none' skips the weighting path entirely
++    (pre-patch reduction, ``clamp(min=1.0)`` denominator, first-N loss windows
++    allowed), while 'uniform' exercises the same weighted code path as every
++    other mode -- weight-normalized-mean reduction, ``clamp(min=1e-6)``
++    denominator, live-row bookkeeping, and the full-loss-window requirement --
++    so a 'uniform' vs 'tail-window' comparison isolates the weight PROFILE
++    from the weighting machinery. The trainer's tensor path fills all-ones
++    directly; this function is the doctested per-row spec.
++
++    >>> uniform_weights(3)
++    [1.0, 1.0, 1.0]
++    >>> uniform_weights(0)
++    []
++    >>> uniform_weights(5) == tail_window_weights(5, 0.123, 5)  # tail >= len
++    True
++    """
++    return [1.0] * int(n_tokens)
++
++
  def prepare_distil_dataset(
      dataset: Dataset,
      prompt_key: str = "prompt",
+diff --git a/train.py b/train.py
+index 275f34f..906d19d 100644
 --- a/train.py
 +++ b/train.py
-@@ -143,6 +143,23 @@ def parse_args():
+@@ -143,6 +143,29 @@ def parse_args():
                          help="Dataset column holding the scalar gold answer used for gate grading")
      parser.add_argument("--gate_wrong_answer_key", type=str, default=None,
                          help="Dataset column holding the in-context wrong answer used for gate grading")
 +    parser.add_argument("--token_weight_mode", type=str, default="none",
-+                        choices=["none", "boxed_hybrid", "numeric-skeleton"],
++                        choices=["none", "boxed_hybrid", "numeric-skeleton", "tail-window", "uniform"],
 +                        help="'boxed_hybrid': reweight the per-token JSD toward the rollout's last \\boxed{...} "
 +                             "span. 'numeric-skeleton' (recommended): boxed span at token_weight_span plus every "
-+                             "intermediate 'a op b = c' result token at token_weight_mid (see "
-+                             "DistilConfig.token_weight_mode). Default 'none' = pre-patch behaviour.")
++                             "intermediate 'a op b = c' result token at token_weight_mid. 'tail-window': 1.0 on "
++                             "the last token_weight_tail_tokens tokens, epsilon before (no locator; the most "
++                             "generalizable baseline arm). 'uniform': explicit all-ones control through the "
++                             "weighted path, distinct from 'none' (see DistilConfig.token_weight_mode). "
++                             "Default 'none' = pre-patch behaviour.")
 +    parser.add_argument("--token_weight_epsilon", type=float, default=0.001,
 +                        help="Weight on tokens outside the boxed span and pre-span window")
 +    parser.add_argument("--token_weight_span", type=float, default=1.0,
@@ -357,13 +457,16 @@ Binary files /dev/null and b/b/opsd/__pycache__/trainer.cpython-314.pyc differ
 +                        help="Weight on the window of tokens immediately before the boxed span")
 +    parser.add_argument("--token_weight_pre_span_tokens", type=int, default=256,
 +                        help="Length in tokens of the pre-span window (0 = pure hard window)")
++    parser.add_argument("--token_weight_tail_tokens", type=int, default=4096,
++                        help="Length in tokens of the uniform-1.0 window at the END of each rollout "
++                             "(tail-window mode only; shorter rollouts get all-ones)")
 +    parser.add_argument("--token_weight_mid", type=float, default=0.2,
 +                        help="Weight on every intermediate 'a op b = c' result token "
 +                             "(numeric-skeleton mode only)")
      parser.add_argument("--use_onpolicy_demos", type=parse_bool, default=False,
                         help="Use correct on-policy completions as teacher demos instead of gold answers")
      parser.add_argument("--onpolicy_demo_reward_threshold", type=float, default=1.0,
-@@ -325,6 +342,22 @@ if __name__ == "__main__":
+@@ -325,6 +348,22 @@ if __name__ == "__main__":
                       f"regen_rounds={args.gate_max_regen_rounds}, "
                       f"require_diff_answer={args.gate_require_diff_answer})")
  
@@ -380,13 +483,13 @@ Binary files /dev/null and b/b/opsd/__pycache__/trainer.cpython-314.pyc differ
 +            "token_weight_mode is untested with speculative/splice/teacher generation"
 +        logging.info(f"Token-weighted distillation: ENABLED (mode={args.token_weight_mode}, "
 +                     f"epsilon={args.token_weight_epsilon}, span={args.token_weight_span}, "
-+                     f"mid={args.token_weight_mid}, "
++                     f"mid={args.token_weight_mid}, tail={args.token_weight_tail_tokens}, "
 +                     f"pre_span={args.token_weight_pre_span} x {args.token_weight_pre_span_tokens} tokens)")
 +
      train_dataset = prepare_distil_dataset(
          raw_dataset,
          prompt_key=args.prompt_key,
-@@ -400,6 +433,14 @@ if __name__ == "__main__":
+@@ -400,6 +439,15 @@ if __name__ == "__main__":
          "gate_max_regen_rounds": args.gate_max_regen_rounds,
          "gate_require_diff_answer": args.gate_require_diff_answer,
  
@@ -397,6 +500,7 @@ Binary files /dev/null and b/b/opsd/__pycache__/trainer.cpython-314.pyc differ
 +        "token_weight_pre_span": args.token_weight_pre_span,
 +        "token_weight_pre_span_tokens": args.token_weight_pre_span_tokens,
 +        "token_weight_mid": args.token_weight_mid,
++        "token_weight_tail_tokens": args.token_weight_tail_tokens,
 +
          # Critique-conditioned self-teaching settings
          "use_critique": args.use_critique,

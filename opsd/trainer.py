@@ -2399,19 +2399,42 @@ class DistilTrainer(BaseTrainer):
         #                         true result +1.39 nats, 31 sigma;
         #                         rl/eval_midtrace_slip.py), epsilon elsewhere.
         #                         Boxed-span weight wins where the two overlap.
-        # Rollouts with no boxed span get all-zero weight and drop out of the
-        # loss the same way gate failures do -- falling back to uniform there
-        # would silently reintroduce exactly the style distillation these modes
-        # remove. Runs AFTER gate regeneration (completion_ids_list is final)
-        # and after the loss-window truncation (indices are clipped to the loss
-        # width, though train.py forbids combining the two).
+        #   'tail-window'      -- 1.0 on the LAST token_weight_tail_tokens
+        #                         tokens of each rollout, epsilon before them.
+        #                         No locator, no regex: the most generalizable
+        #                         baseline arm (references tolerated).
+        #   'uniform'          -- all-ones. Explicit control arm exercising the
+        #                         weighted code path (weight-normalized mean,
+        #                         full loss window); distinct from 'none',
+        #                         which skips this path entirely.
+        # Rollouts with no boxed span (boxed modes only) get all-zero weight
+        # and drop out of the loss the same way gate failures do -- falling
+        # back to uniform there would silently reintroduce exactly the style
+        # distillation those modes remove. 'tail-window' and 'uniform' never
+        # drop rows. Runs AFTER gate regeneration (completion_ids_list is
+        # final) and after the loss-window truncation (indices are clipped to
+        # the loss width, though train.py forbids combining the two).
         token_loss_weights = None
         _twm = getattr(self.args, "token_weight_mode", "none")
-        if _twm in ("boxed_hybrid", "numeric-skeleton") and mode == "train":
+        if _twm in ("boxed_hybrid", "numeric-skeleton", "tail-window", "uniform") and mode == "train":
             weight_width = completion_ids.size(1)
             w_rows, n_no_span = [], 0
             for ids in completion_ids_list:
-                if _twm == "numeric-skeleton":
+                if _twm == "uniform":
+                    # All-ones (see uniform_weights for the doctested per-row
+                    # spec). Padding positions beyond the row's real length are
+                    # killed by loss_completion_mask; 1.0 there is inert.
+                    w = torch.ones(weight_width, device=device)
+                elif _twm == "tail-window":
+                    row = tail_window_weights(
+                        min(len(ids), weight_width),
+                        float(self.args.token_weight_epsilon),
+                        int(self.args.token_weight_tail_tokens),
+                    )
+                    w = torch.full((weight_width,), float(self.args.token_weight_epsilon), device=device)
+                    if row:
+                        w[:len(row)] = torch.tensor(row, dtype=w.dtype, device=device)
+                elif _twm == "numeric-skeleton":
                     row = numeric_skeleton_weights(
                         list(ids), self.processing_class.decode,
                         float(self.args.token_weight_epsilon),
@@ -2439,10 +2462,15 @@ class DistilTrainer(BaseTrainer):
                         w[s:e] = float(self.args.token_weight_span)
                 w_rows.append(w)
             token_loss_weights = torch.stack(w_rows)
-            agg_no_span = self.accelerator.gather(
-                torch.tensor(n_no_span / max(len(completion_ids_list), 1), device=device)
-            )
-            self._metrics[mode]["weights/no_span_fraction"].append(agg_no_span.mean().item())
+            if _twm in ("boxed_hybrid", "numeric-skeleton"):
+                # 'tail-window'/'uniform' have no span concept and never drop
+                # rows; logging a constant 0 would only invite misreading. The
+                # gather stays symmetric across ranks because the mode is a
+                # global config value.
+                agg_no_span = self.accelerator.gather(
+                    torch.tensor(n_no_span / max(len(completion_ids_list), 1), device=device)
+                )
+                self._metrics[mode]["weights/no_span_fraction"].append(agg_no_span.mean().item())
 
         # Concatenate prompt_mask with completion_mask for logit computation
         prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)  # (B, P+C)
@@ -2972,6 +3000,53 @@ def numeric_skeleton_weights(ids, decode, eps, w_mid, w_span):
     for t in range(span[0], min(span[1], len(ids))):
         w[t] = float(w_span)
     return w
+
+
+def tail_window_weights(n_tokens, eps, tail):
+    """Per-token loss weights for ``token_weight_mode='tail-window'``: 1.0 on
+    the LAST ``tail`` tokens of the completion, ``eps`` before them. Pure
+    function over the row's real (unpadded) token count -- no token ids, no
+    decode, no locator: the answer region of a terminated trace lives at the
+    end, so a fixed tail window covers it without any span detection. Rollouts
+    shorter than ``tail`` get all-ones (never dropped -- there is no no-span
+    semantics in this mode). Returns a list of ``n_tokens`` floats.
+
+    >>> tail_window_weights(6, 0.001, 4)
+    [0.001, 0.001, 1.0, 1.0, 1.0, 1.0]
+    >>> tail_window_weights(3, 0.001, 4)   # shorter than the tail -> all-ones
+    [1.0, 1.0, 1.0]
+    >>> tail_window_weights(4, 0.001, 4)   # exactly the tail -> all-ones
+    [1.0, 1.0, 1.0, 1.0]
+    >>> tail_window_weights(2, 0.5, 0)     # tail 0 -> epsilon everywhere
+    [0.5, 0.5]
+    >>> tail_window_weights(0, 0.001, 4)   # empty completion
+    []
+    """
+    n_tokens, tail = int(n_tokens), int(tail)
+    cut = max(0, n_tokens - tail)
+    return [float(eps)] * cut + [1.0] * (n_tokens - cut)
+
+
+def uniform_weights(n_tokens):
+    """Per-token loss weights for ``token_weight_mode='uniform'``: 1.0 on
+    every completion token. This is an EXPLICIT all-ones arm, distinct from
+    ``token_weight_mode='none'``: 'none' skips the weighting path entirely
+    (pre-patch reduction, ``clamp(min=1.0)`` denominator, first-N loss windows
+    allowed), while 'uniform' exercises the same weighted code path as every
+    other mode -- weight-normalized-mean reduction, ``clamp(min=1e-6)``
+    denominator, live-row bookkeeping, and the full-loss-window requirement --
+    so a 'uniform' vs 'tail-window' comparison isolates the weight PROFILE
+    from the weighting machinery. The trainer's tensor path fills all-ones
+    directly; this function is the doctested per-row spec.
+
+    >>> uniform_weights(3)
+    [1.0, 1.0, 1.0]
+    >>> uniform_weights(0)
+    []
+    >>> uniform_weights(5) == tail_window_weights(5, 0.123, 5)  # tail >= len
+    True
+    """
+    return [1.0] * int(n_tokens)
 
 
 def prepare_distil_dataset(
