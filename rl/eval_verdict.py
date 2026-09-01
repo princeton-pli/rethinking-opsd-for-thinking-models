@@ -82,7 +82,7 @@ def main():
         lora_request = LoRARequest("adapter", 1, args.adapter)
     llm = LLM(model=args.model, dtype="bfloat16", gpu_memory_utilization=0.9,
               **lora_kwargs)
-    sp_no = SamplingParams(temperature=0.0, max_tokens=64, logprobs=20)
+    sp_no = SamplingParams(temperature=0.0, max_tokens=512, logprobs=20)
     sp_th = SamplingParams(temperature=0.0, max_tokens=8192)
 
     idx = {False: [i for i, (_, t) in enumerate(prompts) if not t],
@@ -105,14 +105,17 @@ def main():
     with open(args.out, "w") as f:
         for m, res in zip(meta, results):
             vis = res["text"].split("</think>")[-1]
-            v = YES_RE.search(vis)
-            verdict = v.group(1).lower() if v else None
+            # LAST yes/no: under a checklist the early ones answer per-rule
+            # sub-questions, the final one is the verdict.
+            matches = YES_RE.findall(vis)
+            verdict = matches[-1].lower() if matches else None
             want = "yes" if m["candidate"] == "plus" else "no"
             ok = verdict == want
             j = 0 if m["cell"] == "nothink" else 2
             n[m["candidate"]][j] += ok
             n[m["candidate"]][j + 1] += 1
             f.write(json.dumps({**m, "verdict": verdict, "ok": ok,
+                                "text": res["text"],
                                 **({"first_token_lps": res["first_token_lps"]}
                                    if "first_token_lps" in res else {})}) + "\n")
 
