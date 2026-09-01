@@ -8,9 +8,16 @@
 #SBATCH --time=6:00:00
 #SBATCH --output=/scratch/gpfs/ARORA/arora/opsd/rl/slurm-%j.out
 #
-# Grader-RL first signal run (SPEC §5/§7): Qwen3-4B + LoRA GRPO on prefix-
-# continuation episodes. verl 0.7.0 from della-post-training's rlvr venv.
+# Grader-RL run (SPEC §5/§7): Qwen3-4B + LoRA on prefix-continuation
+# episodes. verl 0.7.0 from della-post-training's rlvr venv.
 # Budget: 4 H100 x 6h = 24 H100-h, the spec cap for the signal run.
+#
+# NOTE ON NAMING: the objective is REINFORCE WITH A GROUP-MEAN BASELINE, not
+# GRPO proper. verl's `adv_estimator=grpo` is only the config key for the
+# group-relative advantage; std scaling (norm_adv_by_std_in_grpo) and length
+# normalization (loss_agg_mode) are both OFF, leaving A = R - mean(R_group)
+# with token-sum aggregation, plus a 1e-3 KL to the frozen model. The
+# "grpo" in the filename and experiment name is legacy.
 #
 # CRITICAL 0.7.0 facts (verified against installed source + smoke test):
 #  * No sync rollout; generation goes through the AgentLoop, which applies
