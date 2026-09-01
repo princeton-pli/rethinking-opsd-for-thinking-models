@@ -72,6 +72,7 @@ def parse_args():
                              "--sync_ref_model=False and --generate_from_teacher=False: EMA-mixing a "
                              "different-init teacher toward the student is neither self-distillation nor a "
                              "frozen swapped teacher, and generation must stay on-policy (student).")
+    parser.add_argument("--tokenizer_name", type=str, default=None, help="Tokenizer name (defaults to model_name)")
     parser.add_argument("--wandb_project", type=str, default=os.environ.get("WANDB_PROJECT", "better-than-sft"), help="Wandb project name")
     parser.add_argument("--run_name", type=str, default=None, help="Wandb run name (defaults to output_dir basename)")
     
