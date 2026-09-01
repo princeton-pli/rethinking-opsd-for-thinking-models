@@ -201,6 +201,7 @@ train() {
         --loss_max_completion_tokens="${LOSS_MAX_COMPLETION_TOKENS:-0}" \
         --jsd_chunk_size="${JSD_CHUNK_SIZE:-0}" \
         --gate_mode="${GATE_MODE}" \
+        --gate_grader="${GATE_GRADER:-math}" \
         --gate_max_regen_rounds="${GATE_MAX_REGEN_ROUNDS}" \
         --gate_require_diff_answer="${GATE_REQUIRE_DIFF_ANSWER}" \
         ${GATE_GOLD_ANSWER_KEY:+--gate_gold_answer_key="${GATE_GOLD_ANSWER_KEY}"} \

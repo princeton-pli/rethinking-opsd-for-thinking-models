@@ -12,6 +12,47 @@ _THINKING_PATTERNS = [
 ]
 
 
+def _countdown_gate_verdict(text, gold, wrong, problem, require_diff):
+    """Countdown wrong-only-gate verdict for one rollout (True = train on it).
+
+    Uses the deterministic task grader (rl.reward_countdown.grade_countdown:
+    strip-at-'=' + value + exactly-once multiset) with the number list parsed
+    from the student prompt. Ungradeable (no box / unparseable numbers) ->
+    False, matching the math gate's exclusion semantics.
+
+    >>> P = "Numbers: [92, 5, 66]\\nTarget: 31"
+    >>> _countdown_gate_verdict("x \\\\boxed{92+5-66=31}", "31", "", P, False)
+    False
+    >>> _countdown_gate_verdict("x \\\\boxed{92+5}", "31", "", P, False)
+    True
+    >>> _countdown_gate_verdict("x \\\\boxed{92-66+5}", "31", "", P, False)
+    False
+    >>> _countdown_gate_verdict("no box here", "31", "", P, False)
+    False
+    >>> _countdown_gate_verdict("x \\\\boxed{92+5-65}", "31", "92+5-65", P, True)
+    False
+    >>> _countdown_gate_verdict("x \\\\boxed{92+5-65}", "31", "92-5-65", P, True)
+    True
+    """
+    import re as _re
+    from rl.reward_countdown import grade_countdown, _last_boxed_content
+
+    boxed = _last_boxed_content(text.replace("$", "").replace(" ", ""))
+    if not boxed:
+        return False
+    m = _re.search(r"Numbers:\s*\[([0-9,\s]+)\]", problem or "")
+    if not m:
+        return False
+    nums = [int(x) for x in m.group(1).split(",")]
+    if grade_countdown(text, str(gold), nums) == 1.0:
+        return False
+    if require_diff and wrong:
+        norm = lambda s: "".join(str(s).split())
+        if norm(boxed.split("=")[0]) == norm(str(wrong).split("=")[0]):
+            return False
+    return True
+
+
 def strip_thinking_tokens(text: str) -> str:
     for pat in _THINKING_PATTERNS:
         text = pat.sub('', text)
@@ -1943,21 +1984,37 @@ class DistilTrainer(BaseTrainer):
                 parts.append(self._jsd_per_token(s_slice, t_slice))
         return torch.cat(parts, dim=1)
 
-    def _gate_status(self, completion_ids_list, gold_answers, wrong_answers):
+    def _gate_status(self, completion_ids_list, gold_answers, wrong_answers,
+                     problems=None):
         """Wrong-only gate: True where a completion is (a) terminated (not truncated),
         (b) gradeable, (c) incorrect vs the gold answer, and (d) when
-        gate_require_diff_answer, math-inequivalent to the in-context wrong answer."""
+        gate_require_diff_answer, inequivalent to the in-context wrong answer.
+
+        gate_grader='countdown' uses the deterministic task grader (value AND
+        exactly-once multiset, strip-at-'=') instead of math_equal, which
+        mislabels 'expr = result' boxes as wrong (the b0de1b4 bug, 16.5% base
+        rate -- would contaminate the wrong-gate with correct rollouts) and
+        cannot check the multiset constraint at all (constraint-violators
+        would escape the gate as 'correct'). Needs `problems` (student prompt
+        texts) to recover each instance's number list."""
         from evaluation.utils import extract_answer_math
         from evaluation.grader import math_equal
 
+        use_cd = getattr(self.args, "gate_grader", "math") == "countdown"
         eos_and_pad = [self.eos_token_id, self.pad_token_id]
         live = []
-        for ids, gold, wrong in zip(completion_ids_list, gold_answers, wrong_answers):
+        for i, (ids, gold, wrong) in enumerate(
+                zip(completion_ids_list, gold_answers, wrong_answers)):
             ids = list(ids)
             if len(ids) == 0 or ids[-1] not in eos_and_pad:
                 live.append(False)  # truncated -> no final answer -> ungradeable
                 continue
             text = self.processing_class.decode(ids, skip_special_tokens=True)
+            if use_cd:
+                live.append(_countdown_gate_verdict(
+                    text, gold, wrong, problems[i],
+                    self.args.gate_require_diff_answer))
+                continue
             pred = extract_answer_math(text)
             if not pred:
                 live.append(False)
@@ -2135,7 +2192,11 @@ class DistilTrainer(BaseTrainer):
         if self.args.gate_mode == "wrong_only" and mode == "train" and not self.args.splice_generation:
             gate_golds = [x.get("gate_gold_answer", "") for x in inputs]
             gate_wrongs = [x.get("wrong_answer", "") for x in inputs]
-            gate_live = self._gate_status(completion_ids_list, gate_golds, gate_wrongs)
+            gate_problems = [
+                x["prompt"][0]["content"] if isinstance(x.get("prompt"), list)
+                else str(x.get("prompt", "")) for x in inputs]
+            gate_live = self._gate_status(completion_ids_list, gate_golds,
+                                          gate_wrongs, problems=gate_problems)
             initial_live = sum(gate_live)
             rounds_used = 0
             for _round in range(self.args.gate_max_regen_rounds):
@@ -2150,7 +2211,8 @@ class DistilTrainer(BaseTrainer):
                     regen_logps_list,
                     _regen_forward_kwargs,
                 ) = self._generate(prompts, images)
-                regen_live = self._gate_status(regen_completion_ids_list, gate_golds, gate_wrongs)
+                regen_live = self._gate_status(regen_completion_ids_list, gate_golds,
+                                               gate_wrongs, problems=gate_problems)
                 for i in range(len(completion_ids_list)):
                     if not gate_live[i] and regen_live[i]:
                         completion_ids_list[i] = regen_completion_ids_list[i]

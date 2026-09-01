@@ -755,6 +755,15 @@ class DistilConfig(TrainingArguments):
             "splice_generation, generate_from_teacher, and use_critique."
         },
     )
+    gate_grader: str = field(
+        default="math",
+        metadata={
+            "help": "'math' (default, math_equal) or 'countdown' (deterministic task grader: "
+            "strip-at-'=' + value + exactly-once multiset, numbers parsed from the student "
+            "prompt). math_equal mislabels 'expr = result' boxes as wrong and cannot check "
+            "the multiset constraint; use 'countdown' for Countdown-task gating."
+        },
+    )
     gate_max_regen_rounds: int = field(
         default=3,
         metadata={

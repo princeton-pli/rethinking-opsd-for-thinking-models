@@ -73,6 +73,7 @@ export PROMPT_KEY=problem
 export GOLD_ANSWER_KEY=teacher_context  # pre-rendered v4 pair context
 export TEACHER_PROMPT_TEMPLATE='{gold_answer}'
 export GATE_MODE=wrong_only
+export GATE_GRADER=countdown         # deterministic task grader for the gate
 export GATE_REQUIRE_DIFF_ANSWER=False   # as in Arm 1
 export GATE_GOLD_ANSWER_KEY=answer      # Countdown TARGET integer (value-equality
                                         # gate; constraint caveat in REVIEW.md)

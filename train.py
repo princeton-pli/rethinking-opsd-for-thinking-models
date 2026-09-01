@@ -144,6 +144,12 @@ def parse_args():
                              "different-from-context) final answer; failed rows are regenerated then masked")
     parser.add_argument("--gate_max_regen_rounds", type=int, default=3,
                         help="Fixed full-batch regeneration rounds to replace rollouts failing the gate")
+    parser.add_argument("--gate_grader", type=str, default="math",
+                        choices=["math", "countdown"],
+                        help="Gate grading: 'countdown' = deterministic task "
+                             "grader (value + exactly-once multiset, strip-at-"
+                             "'='); math_equal mislabels expr=result boxes and "
+                             "ignores the multiset constraint.")
     parser.add_argument("--gate_require_diff_answer", type=parse_bool, default=True,
                         help="Gated rollouts must differ (math-equivalence) from the 'wrong_answer' column")
     parser.add_argument("--gate_gold_answer_key", type=str, default=None,
@@ -450,6 +456,7 @@ if __name__ == "__main__":
 
         # Wrong-rollout gate settings (contrastive OPSD)
         "gate_mode": args.gate_mode,
+        "gate_grader": args.gate_grader,
         "gate_max_regen_rounds": args.gate_max_regen_rounds,
         "gate_require_diff_answer": args.gate_require_diff_answer,
 
