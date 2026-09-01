@@ -45,6 +45,9 @@ export OPSD_SYNC_REF_MODEL=False
 export PROMPT_KEY=problem
 export GOLD_ANSWER_KEY=teacher_context
 export TEACHER_PROMPT_TEMPLATE='{gold_answer}'
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # smoke peaked at 80.6/81.9 GB;
+                                        # fragmentation headroom for 53 steps
+export SAVE_STRATEGY=steps SAVE_STEPS=15  # late-OOM costs a resume, not the run
 export GATE_MODE=wrong_only
 export GATE_GRADER=countdown         # deterministic task grader for the gate
 export GATE_REQUIRE_DIFF_ANSWER=False

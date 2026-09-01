@@ -187,7 +187,8 @@ train() {
         --lr_scheduler_type="cosine" \
         --bf16=True \
         --logging_steps=1 \
-        --save_strategy="no" \
+        --save_strategy="${SAVE_STRATEGY:-no}" \
+        ${SAVE_STEPS:+--save_steps="${SAVE_STEPS}"} \
         --seed="${SEED:-42}" \
         --report_to="${OPSD_REPORT_TO}" \
         --gradient_checkpointing=True \
