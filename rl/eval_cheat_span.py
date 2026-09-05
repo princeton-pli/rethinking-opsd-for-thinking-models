@@ -53,10 +53,17 @@ def reuses_numbers(boxed, nums):
 
 
 @torch.no_grad()
-def span_logp(model, tok, device, ctx, prefix, span):
-    """Mean per-token logprob of `span`, given ctx+prefix."""
-    head = tok(ctx + prefix, return_tensors="pt",
-               add_special_tokens=False)["input_ids"]
+def span_logp(model, tok, device, ctx, prefix, span, max_prefix_tokens=3000):
+    """Mean per-token logprob of `span`, given ctx + (truncated) prefix.
+
+    The prefix is capped to its LAST max_prefix_tokens tokens: full traces run
+    10k+ tokens and two fp32 4B models OOM'd on the raw version. Both models
+    see the identical truncated context, so the comparison is unaffected.
+    """
+    ctx_ids = tok(ctx, return_tensors="pt", add_special_tokens=False)["input_ids"]
+    pre_ids = tok(prefix, return_tensors="pt",
+                  add_special_tokens=False)["input_ids"][:, -max_prefix_tokens:]
+    head = torch.cat([ctx_ids, pre_ids], dim=1)
     tail = tok(span, return_tensors="pt", add_special_tokens=False)["input_ids"]
     if tail.shape[1] == 0:
         return None
@@ -103,13 +110,6 @@ def main():
             items.append((qid, p, nums, target, r["response"], vis, i, boxed))
 
     device = "cuda"
-    base = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=torch.float32, device_map=device).eval()
-    from peft import PeftModel
-    rl = PeftModel.from_pretrained(
-        AutoModelForCausalLM.from_pretrained(
-            args.model, torch_dtype=torch.float32, device_map=device),
-        args.adapter).eval()
 
     def render(c):
         return tok.apply_chat_template([{"role": "user", "content": c}],
@@ -117,29 +117,48 @@ def main():
                                        add_generation_prompt=True,
                                        enable_thinking=True)
 
-    rows = []
+    # Precompute contexts/prefixes/spans once.
+    work = []
     for qid, p, nums, target, resp, vis, i, boxed in items:
         a, b = ((p["x_plus"], p["x_minus"]) if p["pos_first"]
                 else (p["x_minus"], p["x_plus"]))
-        bare_ctx = render(v2_bare_content(nums, target))
-        pair_ctx = render(v4_pair_content(nums, target, a, b))
-        # prefix = everything up to the boxed span; span = the cheat itself
         think_end = resp.find("</think>") + len("</think>")
-        prefix = resp[:think_end] + vis[:i]
-        span = vis[i:i + len("\\boxed{") + len(boxed) + 1]
         xm_boxed = _last_boxed_content(
             str(p["x_minus"]).replace("$", "").replace(" ", ""))
-        row = {"question_id": qid,
-               "xminus_is_cheat": bool(reuses_numbers(xm_boxed, nums))}
-        for name, m, ctx in (("base_bare", base, bare_ctx),
-                             ("pair_base", base, pair_ctx),
-                             ("pair_rl", rl, pair_ctx)):
-            row[name] = span_logp(m, tok, device, ctx, prefix, span)
-        rows.append(row)
-        if len(rows) % 25 == 0:
-            print(f"{len(rows)}/{len(items)}", flush=True)
+        work.append({
+            "question_id": qid,
+            "xminus_is_cheat": bool(reuses_numbers(xm_boxed, nums)),
+            "bare_ctx": render(v2_bare_content(nums, target)),
+            "pair_ctx": render(v4_pair_content(nums, target, a, b)),
+            "prefix": resp[:think_end] + vis[:i],
+            "span": vis[i:i + len("\\boxed{") + len(boxed) + 1],
+        })
 
-    df = pd.DataFrame(rows).dropna()
+    # ONE model resident at a time: two fp32 4B models OOM'd together.
+    from peft import PeftModel
+    for pass_name in ("base", "rl"):
+        m = AutoModelForCausalLM.from_pretrained(
+            args.model, torch_dtype=torch.float32, device_map=device)
+        if pass_name == "rl":
+            m = PeftModel.from_pretrained(m, args.adapter)
+        m.eval()
+        for j, w in enumerate(work):
+            if pass_name == "base":
+                w["base_bare"] = span_logp(m, tok, device, w["bare_ctx"],
+                                           w["prefix"], w["span"])
+                w["pair_base"] = span_logp(m, tok, device, w["pair_ctx"],
+                                           w["prefix"], w["span"])
+            else:
+                w["pair_rl"] = span_logp(m, tok, device, w["pair_ctx"],
+                                         w["prefix"], w["span"])
+            if (j + 1) % 25 == 0:
+                print(f"[{pass_name}] {j + 1}/{len(work)}", flush=True)
+        del m
+        torch.cuda.empty_cache()
+
+    df = pd.DataFrame([{k: v for k, v in w.items()
+                        if k not in ("bare_ctx", "pair_ctx", "prefix", "span")}
+                       for w in work]).dropna()
     df.to_json(args.out, orient="records", lines=True)
 
     def report(sub, label):
