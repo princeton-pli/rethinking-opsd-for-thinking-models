@@ -96,6 +96,27 @@ V4_PAIR_EPISODE = (
     "answer within \\boxed{{}}."
 )
 
+# Cheat warning (Sanjeev 2026-09-05): the dominant failure mode is
+# self-cancelling filler -- hitting TARGET with a subset, then disposing of
+# leftover numbers via terms that cancel, e.g. +(a-a) or x(b-c)/(b-c), which
+# REUSE numbers. 30% of base generations, 43% after OPSD training. This
+# warning goes in the TEACHER context only. Because the teacher scores the
+# student's trace as though it were its own, a first-person self-check should
+# lower its probability on exactly those tokens -- amplifying the corrective
+# signal where the damage lives. Task-general, so no solution leakage.
+CHEAT_WARNING = (
+    "\n\nCAUTION. A common error in this task is to find a subexpression that "
+    "reaches the TARGET using only SOME of the numbers, and then dispose of "
+    "the leftover numbers with terms that cancel out -- for example appending "
+    "+(a-a), or multiplying and dividing by the same quantity (b-c)/(b-c). "
+    "Such expressions are INVALID: they use numbers more times than LIST "
+    "provides. Every number in LIST must appear in your final expression "
+    "exactly as many times as it appears in LIST -- no more, no fewer. As you "
+    "reason, keep checking the multiset of numbers your expression actually "
+    "uses against LIST, and if it does not match, discard that expression and "
+    "look for a genuine one."
+)
+
 # Self-check suffix (Sanjeev 2026-08-31): rule-by-rule verification of one's
 # own answer before finalizing. Appended to solving prompts as variant "v2c".
 SELF_CHECK = (
@@ -148,6 +169,11 @@ def v4_pair_content(nums, target, a, b, episode=False):
     return (V2_HEAD.format(nums=", ".join(str(n) for n in nums),
                            target=target)
             + tail.format(a=a, b=b))
+
+
+def v5_pair_content(nums, target, a, b, episode=False):
+    """v4 + the self-cancelling-filler warning (teacher context only)."""
+    return v4_pair_content(nums, target, a, b, episode=episode) + CHEAT_WARNING
 
 
 def v2_bare_content(nums, target):

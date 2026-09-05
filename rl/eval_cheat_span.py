@@ -35,7 +35,7 @@ import torch
 import pandas as pd
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from rl.templates import v2_bare_content, v4_pair_content
+from rl.templates import v2_bare_content, v4_pair_content, v5_pair_content
 from rl.reward_countdown import _last_boxed_content
 from pilot.grade_countdown_probe import NUMS_RE, TARGET_RE
 
@@ -130,6 +130,7 @@ def main():
             "xminus_is_cheat": bool(reuses_numbers(xm_boxed, nums)),
             "bare_ctx": render(v2_bare_content(nums, target)),
             "pair_ctx": render(v4_pair_content(nums, target, a, b)),
+            "warn_ctx": render(v5_pair_content(nums, target, a, b)),
             "prefix": resp[:think_end] + vis[:i],
             "span": vis[i:i + len("\\boxed{") + len(boxed) + 1],
         })
@@ -148,8 +149,12 @@ def main():
                                            w["prefix"], w["span"])
                 w["pair_base"] = span_logp(m, tok, device, w["pair_ctx"],
                                            w["prefix"], w["span"])
+                w["warn_base"] = span_logp(m, tok, device, w["warn_ctx"],
+                                           w["prefix"], w["span"])
             else:
                 w["pair_rl"] = span_logp(m, tok, device, w["pair_ctx"],
+                                         w["prefix"], w["span"])
+                w["warn_rl"] = span_logp(m, tok, device, w["warn_ctx"],
                                          w["prefix"], w["span"])
             if (j + 1) % 25 == 0:
                 print(f"[{pass_name}] {j + 1}/{len(work)}", flush=True)
@@ -157,7 +162,8 @@ def main():
         torch.cuda.empty_cache()
 
     df = pd.DataFrame([{k: v for k, v in w.items()
-                        if k not in ("bare_ctx", "pair_ctx", "prefix", "span")}
+                        if k not in ("bare_ctx", "pair_ctx", "warn_ctx",
+                                     "prefix", "span")}
                        for w in work]).dropna()
     df.to_json(args.out, orient="records", lines=True)
 
@@ -166,8 +172,10 @@ def main():
             return
         print(f"\n--- {label} (n={len(sub)}) ---")
         print(f"  base_bare (no pair):      {sub['base_bare'].mean():+.4f}")
-        for col, nm in (("pair_base", "arm B teacher"),
-                        ("pair_rl", "arm A/C teacher")):
+        for col, nm in (("pair_base", "base+pair (armB tchr)"),
+                        ("warn_base", "base+pair+WARNING  "),
+                        ("pair_rl", "RL'd+pair (armA tchr)"),
+                        ("warn_rl", "RL'd+pair+WARNING  ")):
             d = sub[col] - sub["base_bare"]
             sem = d.std() / max(len(d) ** 0.5, 1)
             print(f"  {nm:16s} {sub[col].mean():+.4f} | delta {d.mean():+.4f} "
